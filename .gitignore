@@ -1,0 +1,15 @@
+# secrets / tokens / profiles — the real token lives in ~/.config/dsqrd,
+# but never commit one if it lands here
+profiles.json
+*.token
+*secret*
+.env
+
+# python
+__pycache__/
+*.py[cod]
+
+# nix
+result
+result-*
+.direnv/
