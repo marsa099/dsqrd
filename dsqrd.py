@@ -148,6 +148,27 @@ def map_embeds(m, content):
             imgs.append({"path": url, "full": url, "w": hw[1] or 0, "h": hw[0] or 0,
                          "id": mid, "ext": "", "type": "gif" if gif else "img", "pending": False})
             continue
+        # uploaded video file (mimetype type video/*): placeholder card + play
+        # badge; `v` runs do_view -> downloads the CDN url -> media-viewer.sh -> mpv.
+        if t.startswith("video/"):
+            vurl = url or proxy or main
+            if vurl:
+                cu = _clean(vurl).lower()
+                ext = "mp4"
+                for cand in ("mp4", "webm", "mov", "mkv"):
+                    if cu.endswith("." + cand):
+                        ext = cand
+                        break
+                # Discord's media proxy renders a still frame as JPEG (?format=jpeg);
+                # use it as the poster. UI falls back to a plain ▶ card if it 404s.
+                thumb = ""
+                src = proxy or url
+                if "discordapp" in src:
+                    base = src.replace("cdn.discordapp.com", "media.discordapp.net")
+                    thumb = base + ("&" if "?" in base else "?") + "format=jpeg"
+                imgs.append({"path": thumb, "full": vurl, "w": hw[1] or 0, "h": hw[0] or 0,
+                             "id": mid, "ext": ext, "type": "video", "pending": False})
+            continue
         # link/media embed whose main image is a real image (unfurl image)
         if main and _looks_image(main):
             gif = _clean(main).endswith((".gif", ".apng"))
