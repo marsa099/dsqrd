@@ -553,6 +553,20 @@ class DQS:
         except Exception as e:
             print(f"dsqrd: view error {e!r}", flush=True)
 
+    def set_presence(self, active):
+        """Report desktop activity to Discord's gateway (op 3). afk=False while
+        active holds mobile push (you see it on desktop); afk=True when idle lets
+        Discord route notifications to your phone, so you don't miss them away."""
+        try:
+            if active:
+                d = {"since": 0, "activities": [], "status": "online", "afk": False}
+            else:
+                d = {"since": int(time.time() * 1000), "activities": [], "status": "idle", "afk": True}
+            self.gateway.send({"op": 3, "d": d})
+            print(f"dsqrd: presence -> {'active' if active else 'idle (afk)'}", flush=True)
+        except Exception as e:
+            print(f"dsqrd: presence error {e!r}", flush=True)
+
     def do_upload_clipboard(self, channel_id, thread):
         """Paste (Ctrl+V): grab via wl-paste + upload, then STAGE it (do not send).
         The image goes out with the next message. Reports progress via attachReady."""
@@ -736,6 +750,8 @@ class DQS:
                     threading.Thread(target=self._call, args=("markread", self.discord.ack, ch, cmd["before"]), daemon=True).start()
                 elif t == "view" and cmd.get("url"):
                     threading.Thread(target=self.do_view, args=(conn, cmd["url"], cmd.get("ext", ""), cmd.get("mediatype", "img")), daemon=True).start()
+                elif t == "presence":
+                    threading.Thread(target=self.set_presence, args=(cmd.get("state") != "idle",), daemon=True).start()
                 elif t == "uploadClipboard" and ch:
                     threading.Thread(target=self.do_upload_clipboard, args=(ch, cmd.get("thread")), daemon=True).start()
                 elif t == "dropAttach" and ch:
