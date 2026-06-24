@@ -230,6 +230,9 @@ def _resolve_mentions(content, m):
 def map_msg(m):
     """A normalized endcord message dict → the client's message shape."""
     author = m.get("nick") or m.get("global_name") or m.get("username") or "someone"
+    uid = str(m.get("user_id") or "")
+    if uid and author != "someone":
+        USER_NAMES[uid] = author   # learn channel participants for the @-autocomplete
     content = _resolve_mentions(m.get("content", "") or "", m)
     # reply context (Discord replies carry the parent as referenced_message)
     reply_author = reply_text = ""
@@ -388,13 +391,20 @@ class DQS:
         except Exception as e:
             print(f"dsqrd: emoji build error {e!r}", flush=True)
 
+    def users_payload(self):
+        # Flat known-user list (id -> name), offered under every workspace so the
+        # client's @-autocomplete has candidates regardless of which guild/DM is open.
+        lst = [{"name": n, "id": uid} for uid, n in self.user_names.items() if n]
+        wss = [DM_WS] + [g["guild_id"] for g in self.guilds]
+        return {ws: lst for ws in wss}
+
     def send_bootstrap(self, conn):
         # Direct Messages is a synthetic workspace, listed first so it is the default.
         wss = [{"id": DM_WS, "name": "Direct Messages", "icon": ""}]
         wss += [{"id": g["guild_id"], "name": g.get("name", "?"),
                  "icon": icon_url(g["guild_id"], g.get("icon"))} for g in self.guilds]
         self.write(conn, {"type": "workspaces", "workspaces": wss, "rail": True, "threads": False})
-        self.write(conn, {"type": "users", "users": {}})
+        self.write(conn, {"type": "users", "users": self.users_payload()})
         entries = []
         for dm in self.dms:
             rec = (dm.get("recipients") or [{}])[0]
@@ -439,6 +449,8 @@ class DQS:
             if i + chunk >= len(out):
                 payload["final"] = True
             self.write(conn, payload)
+        # message authors just landed in user_names — refresh @-autocomplete candidates.
+        self.write(conn, {"type": "users", "users": self.users_payload()})
 
     def send_history(self, conn, channel_id, before):
         msgs = self.discord.get_messages(channel_id, num=50, before=before) or []
