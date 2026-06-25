@@ -581,11 +581,11 @@ class DQS:
         except Exception as e:
             print(f"dsqrd: presence error {e!r}", flush=True)
 
-    def do_upload_clipboard(self, channel_id, thread):
+    def do_upload_clipboard(self, channel_id, thread, ev):
         """Paste (Ctrl+V): grab via wl-paste + upload, then STAGE it (do not send).
-        The image goes out with the next message. Reports progress via attachReady."""
-        ev = threading.Event()
-        self.uploading[channel_id] = ev
+        The image goes out with the next message. Reports progress via attachReady.
+        `ev` (the in-flight-upload Event) is created and registered by the caller so
+        a racing send waits for it; we just set() it when done (in finally)."""
         def fail():
             self.broadcast({"type": "attachReady", "channel": channel_id, "name": "", "ok": False})
         try:
@@ -773,7 +773,11 @@ class DQS:
                 elif t == "presence":
                     threading.Thread(target=self.set_presence, args=(cmd.get("state") != "idle",), daemon=True).start()
                 elif t == "uploadClipboard" and ch:
-                    threading.Thread(target=self.do_upload_clipboard, args=(ch, cmd.get("thread")), daemon=True).start()
+                    # Register the upload synchronously so a "send" read next waits
+                    # for the staged image instead of racing past it (text-only).
+                    ev = threading.Event()
+                    self.uploading[ch] = ev
+                    threading.Thread(target=self.do_upload_clipboard, args=(ch, cmd.get("thread"), ev), daemon=True).start()
                 elif t == "dropAttach" and ch:
                     self.pending_attach.pop(ch, None)
                 elif t == "reactors" and ch and cmd.get("ts"):
