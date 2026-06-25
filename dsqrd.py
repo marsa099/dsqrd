@@ -621,9 +621,14 @@ class DQS:
         if not isinstance(m, dict):
             return
         cid = m.get("channel_id")
-        if cid not in self.chan_guild:
-            return
-        ws = self.chan_guild[cid]
+        ws = self.chan_guild.get(cid)
+        if ws is None:
+            # Channel not registered at startup (e.g. a DM/channel opened later):
+            # resolve its workspace from the event and register it, so its live
+            # messages — including our own sent echo — broadcast instead of being
+            # dropped (which forced a channel-switch + re-fetch to see them).
+            ws = m.get("guild_id") or DM_WS
+            self.chan_guild[cid] = ws
         if op in ("MESSAGE_CREATE", "MESSAGE_CREATE_QUICK", "MESSAGE_UPDATE"):
             self.broadcast({"type": "message", "workspace": ws, "channel": cid,
                             "thread": "", "mention": False, "msg": map_msg(m)})
