@@ -534,6 +534,8 @@ class DQS:
         text = self.sub_emoji(text)
         att = self.pending_attach.pop(channel_id, None)   # staged image, if any
         atts = [att] if att else None
+        if not text and not att:
+            return   # nothing to send (defensive; UI guards empty + no attachment)
         if thread:
             self._call(f"send-reply ch={channel_id}", self.discord.send_message, channel_id, text,
                        thread, channel_id, self.guild_for(channel_id), True, atts)
@@ -751,8 +753,10 @@ class DQS:
                     threading.Thread(target=self.send_recent, args=(conn, ch), daemon=True).start()
                 elif t == "history":
                     threading.Thread(target=self.send_history, args=(conn, ch, cmd.get("before")), daemon=True).start()
-                elif t == "send" and ch and cmd.get("text"):
-                    threading.Thread(target=self.do_send, args=(ch, cmd["text"], cmd.get("thread")), daemon=True).start()
+                elif t == "send" and ch:
+                    # allow attachment-only sends (empty text); do_send guards the
+                    # genuinely-empty case (the UI never sends empty + no attachment).
+                    threading.Thread(target=self.do_send, args=(ch, cmd.get("text", ""), cmd.get("thread")), daemon=True).start()
                 elif t == "edit" and ch and cmd.get("ts"):
                     threading.Thread(target=self._call, args=("edit", self.discord.update_message, ch, cmd["ts"], cmd.get("text", "")), daemon=True).start()
                 elif t == "delete" and ch and cmd.get("ts"):
