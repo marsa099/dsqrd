@@ -121,10 +121,23 @@ def content_to_attachment(message, embeds):
                 if embed["url"].split("?")[0] == attachment[0].split("?")[0]:   # query url part usually changes
                     break
             else:
+                # The posted CDN link's signature is gone/expired, so the bare url
+                # now 404s. If Discord unfurled it, reuse that embed's freshly-signed
+                # proxy_url (still on the raw message) so the image actually loads.
+                src, hw = attachment[0], None
+                for raw in (message.get("embeds") or []):
+                    if (raw.get("url") or "").split("?")[0] == attachment[0].split("?")[0]:
+                        th = raw.get("thumbnail") or raw.get("image") or {}
+                        if th.get("proxy_url"):
+                            src = th["proxy_url"]
+                            if th.get("height"):
+                                hw = (th["height"], th["width"])
+                        break
                 embeds.append({
                     "type": "unknown",
-                    "url": attachment[0],
+                    "url": src,
                     "name": attachment[1],
+                    "hw": hw,
                 })
     return message, embeds
 

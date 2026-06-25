@@ -144,8 +144,12 @@ def map_embeds(m, content):
         hw = e.get("hw") or (0, 0)
         # uploaded attachment (mimetype type), or a bare CDN image link
         if t.startswith("image") or (t == "unknown" and _looks_image(url)):
-            gif = t == "image/gif" or _clean(url).endswith((".gif", ".apng"))
-            imgs.append({"path": url, "full": url, "w": hw[1] or 0, "h": hw[0] or 0,
+            # A posted CDN link folds in with no `url` (only a signed proxy/thumbnail);
+            # the bare CDN link 404s now that Discord signs attachment URLs. Fall back
+            # to the signed proxy/main so the image actually loads.
+            src = url or proxy or main
+            gif = t == "image/gif" or _clean(src).endswith((".gif", ".apng"))
+            imgs.append({"path": src, "full": src, "w": hw[1] or 0, "h": hw[0] or 0,
                          "id": mid, "ext": "", "type": "gif" if gif else "img", "pending": False})
             continue
         # uploaded video file (mimetype type video/*): placeholder card + play
