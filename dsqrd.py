@@ -541,17 +541,31 @@ class DQS:
             self._call(f"send ch={channel_id}", self.discord.send_message, channel_id, text,
                        None, None, None, True, atts)
 
-    def do_view(self, conn, url, ext, mediatype):
-        """Download an image URL and tell the client to open it (viewReady)."""
-        try:
-            ext = ext or os.path.splitext(url.split("?")[0])[1].lstrip(".") or "png"
-            dest = f"/tmp/dsqrd-view.{ext}"
-            req = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
-            with urllib.request.urlopen(req, timeout=20) as r, open(dest, "wb") as f:
-                f.write(r.read())
-            self.write(conn, {"type": "viewReady", "path": dest, "mediatype": mediatype})
-        except Exception as e:
-            print(f"dsqrd: view error {e!r}", flush=True)
+    def do_view(self, conn, images, mediatype):
+        """Download the message's full-res media to a dedicated, easy-to-purge dir
+        (~/.cache/dsqrd/view) and tell the client to open them (viewReady). A photo
+        set opens together so imv can page between them. Entries in one message
+        share the message id, so the loop index disambiguates filenames."""
+        viewdir = os.path.expanduser("~/.cache/dsqrd/view")
+        os.makedirs(viewdir, exist_ok=True)
+        paths = []
+        for i, im in enumerate(images):
+            url = im.get("url")
+            if not url:
+                continue
+            ident = im.get("id") or "v"
+            ext = im.get("ext") or os.path.splitext(url.split("?")[0])[1].lstrip(".") or "png"
+            dest = os.path.join(viewdir, f"{ident}-{i}.{ext}")
+            try:
+                if not os.path.exists(dest):
+                    req = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
+                    with urllib.request.urlopen(req, timeout=20) as r, open(dest, "wb") as f:
+                        f.write(r.read())
+                paths.append(dest)
+            except Exception as e:
+                print(f"dsqrd: view error {e!r}", flush=True)
+        if paths:
+            self.write(conn, {"type": "viewReady", "paths": paths, "mediatype": mediatype})
 
     def set_presence(self, active):
         """Report desktop activity to Discord's gateway (op 3). afk=False while
@@ -753,8 +767,9 @@ class DQS:
                     threading.Thread(target=self._call, args=("react", fn, ch, cmd["ts"], emoji), daemon=True).start()
                 elif t == "markread" and ch and cmd.get("before"):
                     threading.Thread(target=self._call, args=("markread", self.discord.ack, ch, cmd["before"]), daemon=True).start()
-                elif t == "view" and cmd.get("url"):
-                    threading.Thread(target=self.do_view, args=(conn, cmd["url"], cmd.get("ext", ""), cmd.get("mediatype", "img")), daemon=True).start()
+                elif t == "view" and (cmd.get("images") or cmd.get("url")):
+                    imgs = cmd.get("images") or [{"id": cmd.get("id"), "url": cmd.get("url"), "ext": cmd.get("ext", "")}]
+                    threading.Thread(target=self.do_view, args=(conn, imgs, cmd.get("mediatype", "img")), daemon=True).start()
                 elif t == "presence":
                     threading.Thread(target=self.set_presence, args=(cmd.get("state") != "idle",), daemon=True).start()
                 elif t == "uploadClipboard" and ch:
