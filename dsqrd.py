@@ -13,6 +13,7 @@ but does not send, edit, react, or mark anything.
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -28,12 +29,33 @@ from dchat.notifier import Notifier
 SOCK = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "dsqrd.sock")
 
 
+def _data_dir():
+    base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    d = os.path.join(base, "dsqrd")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _seed_codemap():
+    """codemap.json is shipped read-only beside dsqrd.py (the daemon never
+    generates it — slqs does). Copy it into the writable XDG data dir on first
+    run so dsqrd.py and the QML both read the same per-app path."""
+    dst = os.path.join(_data_dir(), "codemap.json")
+    if not os.path.exists(dst):
+        src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "codemap.json")
+        try:
+            shutil.copyfile(src, dst)
+        except OSError as e:
+            print(f"dsqrd: codemap seed failed ({e!r})", flush=True)
+    return dst
+
+
 def _load_codemap():
     """Standard emoji shortcode -> unicode glyph, shared with the GUI's picker.
     codemap.json is keyed by colon-wrapped name (":thumbsup:"); the react command
     sends the bare name ("thumbsup"), so the colons are stripped here. Discord's
     reaction API needs the actual glyph, not the shortcode."""
-    path = os.path.expanduser("~/personal/slk-gui-proto/codemap.json")
+    path = _seed_codemap()
     try:
         with open(path, encoding="utf-8") as f:
             raw = json.load(f)
@@ -97,7 +119,7 @@ def emoji_url(emoji_id, animated=False):
     return f"{CDN}/emojis/{emoji_id}.{'gif' if animated else 'png'}?size=48"
 
 
-EMOJI_JSON = os.path.expanduser("~/personal/slk-gui-proto/emoji-dsqrd.json")
+EMOJI_JSON = os.path.join(_data_dir(), "emoji-dsqrd.json")
 
 
 IMG_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".apng")
