@@ -43,8 +43,15 @@
         text = ''
           export SLK_SOCK=dsqrd
           export SLK_MEDIA_VIEWER="${daemon}/share/dsqrd/media-viewer.sh"
-          pgrep -f 'dsqrd\.py' >/dev/null 2>&1 || \
+          sock="$XDG_RUNTIME_DIR/dsqrd.sock"
+          if ! pgrep -f 'dsqrd\.py' >/dev/null 2>&1; then
+            # The daemon binds its socket only after loading all data; drop any
+            # stale socket so the wait below lands on the fresh daemon, not a
+            # leftover file. Guarantees the UI's first connect gets a bootstrap.
+            rm -f "$sock"
             setsid nohup ${daemon}/bin/dsqrd >/tmp/dsqrd.log 2>&1 </dev/null &
+          fi
+          for _ in $(seq 1 100); do [ -S "$sock" ] && break; sleep 0.1; done
           exec qs -p "${daemon}/share/dsqrd/ui"
         '';
       };
