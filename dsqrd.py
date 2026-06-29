@@ -371,6 +371,7 @@ class DQS:
         self.uploading = {}       # channel id -> Event set when an in-flight upload finishes
         self.conns = []
         self.lock = threading.Lock()
+        self.update_event = None   # latest updateAvailable event, replayed to new clients
 
     # ---- wire helpers ----
     def write(self, conn, obj):
@@ -474,6 +475,8 @@ class DQS:
         return {ws: lst for ws in wss}
 
     def send_bootstrap(self, conn):
+        if self.update_event:   # replay update-available state to a (re)connecting client
+            self.write(conn, self.update_event)
         # Direct Messages is a synthetic workspace, listed first so it is the default.
         wss = [{"id": DM_WS, "name": "Direct Messages", "icon": ""}]
         wss += [{"id": g["guild_id"], "name": g.get("name", "?"),
@@ -881,8 +884,9 @@ class DQS:
                     etag = r.headers.get("ETag") or etag
                     latest = r.read().decode().strip()
                 if latest and latest != GIT_REV:
-                    self.broadcast({"type": "updateAvailable",
-                                    "current": GIT_REV[:7], "latest": latest[:7]})
+                    self.update_event = {"type": "updateAvailable",
+                                         "current": GIT_REV[:7], "latest": latest[:7]}
+                    self.broadcast(self.update_event)
             except urllib.error.HTTPError as e:
                 if e.code != 304:   # 304 = unchanged (ETag hit); anything else: retry next cycle
                     pass
