@@ -220,9 +220,22 @@ def map_embeds(m, content):
                 imgs.append({"path": media, "full": media, "w": hw[1] or 0, "h": hw[0] or 0,
                              "id": mid, "ext": "", "type": "gif" if gif else "img", "pending": False})
             continue
-        # textual unfurl (link preview): keep its title/description text
-        if t in UNFURL_TYPES and url.strip() and url.strip() != (content or "").strip():
-            unfurls.append(url.strip())
+        # link/article/rich unfurl (GitHub, x.com, news, …): Discord proxies a
+        # preview image into proxy_url + hw while main_url is the article link.
+        # Show that proxied image — it's a real image regardless of extension, so
+        # don't gate it on _looks_image (GitHub's OG image has no extension).
+        if t in UNFURL_TYPES:
+            if proxy and (hw[0] or hw[1]):
+                imgs.append({"path": proxy, "full": main or proxy, "w": hw[1] or 0, "h": hw[0] or 0,
+                             "id": mid, "ext": "", "type": "img", "pending": False})
+            # url = "<link>\n> title\n> description". Skip it when that prose is already
+            # in the body — e.g. a GitHub/webhook post that spells out the issue AND
+            # triggers Discord's auto-embed of the same link (that was the double-render).
+            # Still add genuinely-new unfurl text for a bare posted link.
+            u = url.strip()
+            prose = " ".join(ln.lstrip("> ").strip() for ln in u.split("\n")[1:]).strip()
+            if u and u != (content or "").strip() and not (prose and prose[:40] in (content or "")):
+                unfurls.append(u)
     if imgs and "youtu" in (content or "").lower():
         print(f"dsqrd-dbg mid={mid} content={ (content or '')[:60]!r} "
               f"embeds={[(str(e.get('type')), (e.get('proxy_url') or e.get('main_url') or '')[:90]) for e in (m.get('embeds') or [])]} "
