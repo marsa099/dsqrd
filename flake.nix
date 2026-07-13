@@ -45,7 +45,12 @@
           export SLK_SOCK=dsqrd
           export SLK_MEDIA_VIEWER="${daemon}/share/dsqrd/media-viewer.sh"
           sock="$XDG_RUNTIME_DIR/dsqrd.sock"
-          if ! pgrep -f 'dsqrd\.py' >/dev/null 2>&1; then
+          alive=""
+          for pid in $(pgrep -f 'dsqrd\.py' 2>/dev/null); do
+            # a zombie (unreaped child) matches pgrep but serves nothing
+            case "$(ps -o stat= -p "$pid" 2>/dev/null)" in Z*|"") ;; *) alive=1 ;; esac
+          done
+          if [ -z "$alive" ]; then
             # The daemon binds its socket only after loading all data; drop any
             # stale socket so the wait below lands on the fresh daemon, not a
             # leftover file. Guarantees the UI's first connect gets a bootstrap.
