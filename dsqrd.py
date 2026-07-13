@@ -365,7 +365,8 @@ def map_msg(m):
     if mm:
         link = mm.group(1)
     return {
-        "author": author, "initials": initials(author), "color": "#7DD3FC",
+        "author": author, "uid": str(m.get("user_id", "") or ""),
+        "initials": initials(author), "color": "#7DD3FC",
         "avatar": avatar_url(m.get("user_id"), m.get("avatar")), "time": hhmm(m.get("timestamp", "")),
         "text": body, "grouped": False,
         "reactionsJson": json.dumps(rx), "imagesJson": json.dumps(imgs),
@@ -390,6 +391,8 @@ class DQS:
         self.dms = []             # [{id,type,name,recipients}]
         self.chan_guild = {}      # channel id -> workspace id (guild_id or DM_WS)
         self.chan_name = {}       # channel id -> name
+        self._presence_snap = {}  # uid -> "active"|"away" (friends/DMs)
+        self._status_snap = {}    # uid -> status emoji (glyph or CDN URL)
         self.dm_group_name = {}   # group-DM channel id -> display name (notifications)
         self.my_id = ""           # own user id (skip self-notify, detect mentions)
         self.active_ch = None     # channel the client is currently viewing (suppress its notifications)
@@ -540,6 +543,7 @@ class DQS:
                 "id": dm["id"], "name": dm.get("name", ""), "kind": "dm",
                 "topic": "", "unread": 0, "mention": False,
                 "avatar": avatar_url(rec.get("id"), rec.get("avatar")), "workspace": DM_WS,
+                "user": str(rec.get("id") or ""),
             })
         for g in self.guilds:
             gid = g["guild_id"]
@@ -549,8 +553,14 @@ class DQS:
                 entries.append({
                     "id": ch["id"], "name": ch.get("name", ""), "kind": "channel",
                     "topic": ch.get("topic") or "", "unread": 0, "mention": False, "avatar": "", "workspace": gid,
+                    "user": "",
                 })
         self.write(conn, {"type": "channels", "channels": entries, "subThreads": []})
+        for ws in [DM_WS] + [g["guild_id"] for g in self.guilds]:
+            if self._presence_snap:
+                self.write(conn, {"type": "presence", "workspace": ws, "all": self._presence_snap})
+            if self._status_snap:
+                self.write(conn, {"type": "status", "workspace": ws, "all": self._status_snap})
 
     def guild_for(self, channel_id):
         """Guild id for a channel, or None for DMs (the @me synthetic workspace)."""
@@ -1017,6 +1027,40 @@ class DQS:
                 pass
             time.sleep(3 * 3600)
 
+    def drain_presence(self):
+        """Poll the gateway's friend/DM presence list (updated by
+        READY_SUPPLEMENTAL + PRESENCE_UPDATE) into presence/status maps the
+        UI understands, broadcast on change. Emitted per workspace id so a
+        friend's status also shows on their guild-channel messages."""
+        while True:
+            acts = self.gateway.get_dm_activities()
+            if not acts:
+                time.sleep(1.0)
+                continue
+            presence, status = {}, {}
+            for a in acts:
+                uid = str(a.get("id") or "")
+                if not uid:
+                    continue
+                presence[uid] = "active" if a.get("status") == "online" else "away"
+                em = a.get("custom_status_emoji")
+                if em:
+                    if em.get("id"):
+                        status[uid] = emoji_url(em["id"], em.get("animated", False))
+                    elif em.get("name"):
+                        status[uid] = em["name"]
+            self._presence_snap, self._status_snap = presence, status
+            self._broadcast_presence()
+            time.sleep(1.0)
+
+    def _broadcast_presence(self):
+        wss = [DM_WS] + [g["guild_id"] for g in self.guilds]
+        for ws in wss:
+            if self._presence_snap:
+                self.broadcast({"type": "presence", "workspace": ws, "all": self._presence_snap})
+            if self._status_snap:
+                self.broadcast({"type": "status", "workspace": ws, "all": self._status_snap})
+
     def run(self):
         threading.Thread(target=self.gateway.connect, daemon=True).start()
         self.wait_ready()
@@ -1027,6 +1071,7 @@ class DQS:
             self.notifier = None
         threading.Thread(target=self.drain_gateway, daemon=True).start()
         threading.Thread(target=self.drain_typing, daemon=True).start()
+        threading.Thread(target=self.drain_presence, daemon=True).start()
         threading.Thread(target=self.watch_focus, daemon=True).start()
         threading.Thread(target=self.heartbeat, daemon=True).start()
         threading.Thread(target=self.check_updates, daemon=True).start()

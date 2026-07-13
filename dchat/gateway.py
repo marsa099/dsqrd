@@ -984,9 +984,11 @@ class Gateway():
                         for user in guild:
                             custom_status = None
                             activities = []
+                            custom_status_emoji = None
                             for activity in user["activities"]:
                                 if activity["type"] == 4:
                                     custom_status = activity.get("state", "")
+                                    custom_status_emoji = activity.get("emoji")
                                 elif activity["type"] in (0, 2):
                                     # assets = activity.get("assets", {})
                                     activities.append({
@@ -1002,16 +1004,19 @@ class Gateway():
                                 "id": user["user_id"],
                                 "status": user["status"],
                                 "custom_status": custom_status,
+                                "custom_status_emoji": custom_status_emoji,
                                 "activities": activities,
                             })
                     else:
                         guild = {}
                     for user in data["merged_presences"]["friends"]:
                         custom_status = None
+                        custom_status_emoji = None
                         activities = []
                         for activity in user["activities"]:
                             if activity["type"] == 4:
                                 custom_status = activity.get("state")
+                                custom_status_emoji = activity.get("emoji")
                             elif activity["type"] in (0, 2):
                                 # assets = activity.get("assets", {})
                                 activities.append({
@@ -1027,6 +1032,7 @@ class Gateway():
                             "id": user["user_id"],
                             "status": user["status"],
                             "custom_status": custom_status,
+                            "custom_status_emoji": custom_status_emoji,
                             "activities": activities,
                         })
                     # get initial voice presences
@@ -1357,10 +1363,12 @@ class Gateway():
                     # received when friend/DM user changes presence state (online/rich/custom)
                     user_id = data["user"]["id"]
                     custom_status = None
+                    custom_status_emoji = None
                     activities = []
                     for activity in data.get("activities", []):
                         if activity["type"] == 4:
                             custom_status = activity.get("state")
+                            custom_status_emoji = activity.get("emoji")
                         elif activity["type"] in (0, 2):
                             # if "assets" in activity:
                             #     small_text =  activity["assets"].get("small_text")
@@ -1399,6 +1407,7 @@ class Gateway():
                                 "id": user_id,
                                 "status": data.get("status"),   # spacebar_fix - status
                                 "custom_status": custom_status,
+                                "custom_status_emoji": custom_status_emoji,
                                 "activities": activities,
                             }
                             break
@@ -1407,6 +1416,7 @@ class Gateway():
                             "id": data["user"]["id"],
                             "status": data.get("status"),   # spacebar_fix - get
                             "custom_status": custom_status,
+                            "custom_status_emoji": custom_status_emoji,
                             "activities": activities,
                         })
                     self.dm_activities_changed = True
