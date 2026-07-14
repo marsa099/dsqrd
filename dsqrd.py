@@ -407,6 +407,8 @@ class DQS:
         self.conns = []
         self.lock = threading.Lock()
         self.update_event = None   # latest updateAvailable event, replayed to new clients
+        self._update_etag = None   # GitHub ETag: conditional requests are free
+        self._last_update_check = 0.0
 
     # ---- wire helpers ----
     def write(self, conn, obj):
@@ -997,34 +999,47 @@ class DQS:
         except OSError:
             self.drop(conn)
             return
+        # A fresh client (app (re)start) → re-check for updates unless we just
+        # did. The warm daemon otherwise only re-checks every 3h, so an app
+        # restart never surfaced a new build. Throttled + ETag-conditional.
+        if GIT_REV and (time.time() - self._last_update_check) > 60:
+            threading.Thread(target=self._check_update_once, daemon=True).start()
         self.read_conn(conn)
 
-    def check_updates(self):
-        """Poll the repo's main SHA and tell the client when a newer build exists.
-        Detect-only — applying is the host's job (flake bump + rebuild). Quiet on
-        source runs (DSQRD_REV unset). Conditional ETag requests stay well under
-        GitHub's unauthenticated 60/h limit."""
+    def _check_update_once(self):
+        """One update check against the repo's main SHA. ETag-conditional, so a
+        304 (unchanged) is free against GitHub's 60/h unauthenticated limit."""
         if not GIT_REV:
             return
+        self._last_update_check = time.time()
         api = "https://api.github.com/repos/daphen/dsqrd/commits/main"
-        etag = None
-        while True:
-            try:
-                headers = {"User-Agent": "dsqrd", "Accept": "application/vnd.github.sha"}
-                if etag:
-                    headers["If-None-Match"] = etag
-                with urllib.request.urlopen(urllib.request.Request(api, headers=headers), timeout=15) as r:
-                    etag = r.headers.get("ETag") or etag
-                    latest = r.read().decode().strip()
-                if latest and latest != GIT_REV:
-                    self.update_event = {"type": "updateAvailable",
-                                         "current": GIT_REV[:7], "latest": latest[:7]}
-                    self.broadcast(self.update_event)
-            except urllib.error.HTTPError as e:
-                if e.code != 304:   # 304 = unchanged (ETag hit); anything else: retry next cycle
-                    pass
-            except Exception:
+        try:
+            headers = {"User-Agent": "dsqrd", "Accept": "application/vnd.github.sha"}
+            if self._update_etag:
+                headers["If-None-Match"] = self._update_etag
+            with urllib.request.urlopen(urllib.request.Request(api, headers=headers), timeout=15) as r:
+                self._update_etag = r.headers.get("ETag") or self._update_etag
+                latest = r.read().decode().strip()
+            if latest and latest != GIT_REV:
+                self.update_event = {"type": "updateAvailable",
+                                     "current": GIT_REV[:7], "latest": latest[:7]}
+                self.broadcast(self.update_event)
+        except urllib.error.HTTPError as e:
+            if e.code != 304:   # 304 = unchanged (ETag hit); anything else: retry next cycle
                 pass
+        except Exception:
+            pass
+
+    def check_updates(self):
+        """Tell the client when a newer build exists. Detect-only — applying is the
+        host's job (flake bump + rebuild). Quiet on source runs (DSQRD_REV unset).
+        Checks at start, then every 3h; also re-checked when a client connects
+        (see _serve_conn) so restarting the app surfaces a new build immediately
+        instead of waiting on the warm daemon's next poll."""
+        if not GIT_REV:
+            return
+        while True:
+            self._check_update_once()
             time.sleep(3 * 3600)
 
     def drain_presence(self):
