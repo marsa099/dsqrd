@@ -10,6 +10,8 @@ but does not send, edit, react, or mark anything.
     python3 dqs.py          # connects via your stored Discord token
     socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/dqs.sock   # eyeball the stream
 """
+import atexit
+import faulthandler
 import json
 import os
 import re
@@ -19,6 +21,11 @@ import subprocess
 import sys
 import threading
 import time
+
+# The daemon died silently once (log just stopped) — make every exit path
+# leave a trace: segfaults dump all stacks, normal exits log that they happened.
+faulthandler.enable()
+atexit.register(lambda: print("dsqrd: process exiting", flush=True))
 import urllib.error
 import urllib.request
 from datetime import datetime
