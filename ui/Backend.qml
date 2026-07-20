@@ -573,6 +573,22 @@ Item {
         for (let i = threadModel.count - 1; i >= 0; i--) { const m = threadModel.get(i); if (m.mine) return m }
         return null
     }
+    // Plain-text transcript of everything posted in the open channel since my
+    // last message there — the source the Microsoft Copilot catch-up summarizes.
+    // Returns { text, count }; count 0 means nothing new since I last spoke.
+    function catchupSince() {
+        const arr = _store[currentChannelId] || []
+        let lastMine = -1
+        for (let i = arr.length - 1; i >= 0; i--) if (arr[i].mine) { lastMine = i; break }
+        const out = []
+        for (let i = lastMine + 1; i < arr.length; i++) {
+            const m = arr[i]
+            let t = plainText(m.text || "").trim()
+            if (!t && m.imagesJson && m.imagesJson !== "[]") t = "[attachment]"
+            out.push((m.time || "") + " " + (m.author || "?") + ": " + t)
+        }
+        return { text: out.join("\n"), count: out.length }
+    }
     // Date grouping for the message list: a stable YYYYMMDD key per message, and
     // a friendly label (Today/Yesterday/weekday) for the section divider.
     function _dk(d) {

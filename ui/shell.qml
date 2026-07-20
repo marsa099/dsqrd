@@ -95,6 +95,10 @@ FloatingWindow {
     }
     function backToNormal() { appRoot.forceActiveFocus() }
 
+    // Microsoft Copilot catch-up: open the takeover overlay and drop to normal
+    // mode so routeKey (not the composer) gets the q/esc that dismiss it.
+    function showCopilot() { copilot.show(); appRoot.forceActiveFocus() }
+
     // When a staged attachment finishes uploading, drop into the composer so a
     // bare Enter sends it — the thread reply if a thread's open, else the channel.
     Connections {
@@ -292,6 +296,12 @@ FloatingWindow {
 
     function routeKey(e) {
         const ctrl = e.modifiers & Qt.ControlModifier
+        // Copilot takeover: q / esc close it; swallow everything else so the app
+        // behind stays frozen while the summary is up.
+        if (copilot.open) {
+            if (e.key === Qt.Key_Escape || e.key === Qt.Key_Q) copilot.close()
+            e.accepted = true; return
+        }
         // Cheat sheet: driven from here (the shell keeps focus; handing it to the
         // overlay proved unreliable). esc closes / clears; / filters; typing edits.
         if (help.open) {
@@ -454,6 +464,7 @@ FloatingWindow {
                             anchors.left: parent.left; anchors.right: parent.right
                             anchors.leftMargin: Theme.insetCard; anchors.rightMargin: Theme.insetCard
                             onExitInsert: win.backToNormal()
+                            onCopilotRequested: win.showCopilot()
                             onOpenPalette: palette.show()
                             onPageScroll: (d) => win.halfPage(d)
                             onPanelMove: (d) => win.focusPanel(d < 0 ? "sidebar" : "messages")
@@ -666,6 +677,13 @@ FloatingWindow {
                 id: help
                 z: 103
                 keymaps: win.keymaps
+                onOpenChanged: if (!open) win.backToNormal()
+            }
+
+            // Microsoft Copilot catch-up takeover (q/esc close, driven by routeKey).
+            CopilotPanel {
+                id: copilot
+                z: 104
                 onOpenChanged: if (!open) win.backToNormal()
             }
 

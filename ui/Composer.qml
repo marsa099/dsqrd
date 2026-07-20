@@ -23,6 +23,7 @@ Rectangle {
     Behavior on border.color { ColorAnimation { duration: 120 } }
 
     signal exitInsert()
+    signal copilotRequested()   // Copilot button → shell opens the catch-up overlay
     signal openPalette()   // Ctrl+K from insert mode → jump palette (drops to normal)
     signal pageScroll(int d)   // Ctrl+D/U from insert mode → drop to normal + half-page scroll
     signal panelMove(int d)    // Ctrl+H/L from insert mode → drop to normal + focus panel left/right
@@ -113,7 +114,7 @@ Rectangle {
     Flickable {
         id: flick
         anchors { left: parent.left; right: parent.right; top: parent.top; bottom: parent.bottom
-                  leftMargin: 14; rightMargin: 50; topMargin: 12 + (((root.attaching && !Backend.threadOpen) || root.replying) ? 24 : 0); bottomMargin: 12 }
+                  leftMargin: 14; rightMargin: 88; topMargin: 12 + (((root.attaching && !Backend.threadOpen) || root.replying) ? 24 : 0); bottomMargin: 12 }
         contentHeight: input.implicitHeight; clip: true
         // keep the cursor in view once the text grows past the visible cap
         function ensureVisible(r) {
@@ -180,6 +181,24 @@ Rectangle {
                 }
             }
         }
+    }
+
+    // Microsoft Copilot catch-up button — summarizes everything posted since your
+    // last message. Sits just left of send; the shell owns the takeover overlay.
+    Rectangle {
+        id: copilotBtn
+        anchors.right: parent.right; anchors.rightMargin: 46
+        anchors.bottom: parent.bottom; anchors.bottomMargin: 8
+        width: 32; height: 32; radius: Theme.radiusSm
+        color: copilotHover.hovered ? Theme.selection : Qt.rgba(Theme.fg.r, Theme.fg.g, Theme.fg.b, 0.06)
+        Behavior on color { ColorAnimation { duration: 120 } }
+        Image { anchors.centerIn: parent; width: 19; height: 19
+                source: Qt.resolvedUrl("copilot.svg")
+                sourceSize.width: 19; sourceSize.height: 19; smooth: true
+                opacity: copilotHover.hovered ? 1.0 : 0.82
+                Behavior on opacity { NumberAnimation { duration: 120 } } }
+        HoverHandler { id: copilotHover; cursorShape: Qt.PointingHandCursor }
+        TapHandler { onTapped: root.copilotRequested() }
     }
 
     // send button
