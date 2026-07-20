@@ -1564,7 +1564,12 @@ class DQS:
         if not GIT_REV:
             return
         self._last_update_check = time.time()
-        api = "https://api.github.com/repos/daphen/dsqrd/commits/main"
+        # Poll the repo this build actually came from — a fork bakes its own rev
+        # into GIT_REV, so checking upstream (daphen) would forever mismatch and
+        # report a phantom update. DSQRD_UPDATE_REPO is set alongside DSQRD_REV
+        # in flake.nix; it defaults to upstream for a stock daphen build.
+        repo = os.environ.get("DSQRD_UPDATE_REPO", "daphen/dsqrd")
+        api = f"https://api.github.com/repos/{repo}/commits/main"
         try:
             headers = {"User-Agent": "dsqrd", "Accept": "application/vnd.github.sha"}
             if self._update_etag:

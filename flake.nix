@@ -32,6 +32,7 @@
             --prefix PYTHONPATH : "$PYTHONPATH" \
             --prefix PATH : "${pkgs.lib.makeBinPath [ pkgs.ffmpeg pkgs.imagemagick ]}" \
             --set DSQRD_REV "${self.rev or ""}" \
+            --set DSQRD_UPDATE_REPO "marsa099/dsqrd" \
             --chdir "$out/share/dsqrd"
           runHook postInstall
         '';
