@@ -614,16 +614,20 @@ Item {
     // Returns { text, count }; count 0 means nothing new since I last spoke.
     function catchupSince() {
         const arr = _store[currentChannelId] || []
-        let lastMine = -1
-        for (let i = arr.length - 1; i >= 0; i--) if (arr[i].mine) { lastMine = i; break }
-        const out = []
-        for (let i = lastMine + 1; i < arr.length; i++) {
-            const m = arr[i]
+        const fmt = (m) => {
             let t = plainText(m.text || "").trim()
             if (!t && m.imagesJson && m.imagesJson !== "[]") t = "[attachment]"
-            out.push((m.time || "") + " " + (m.author || "?") + ": " + t)
+            return (m.time || "") + " " + (m.author || "?") + ": " + t
         }
-        return { text: out.join("\n"), count: out.length }
+        let lastMine = -1
+        for (let i = arr.length - 1; i >= 0; i--) if (arr[i].mine) { lastMine = i; break }
+        const since = arr.slice(lastMine + 1).map(fmt)
+        // Enough new since I last spoke → catch me up on exactly that. Otherwise
+        // there's little/nothing new (I just posted), so widen to the last 50
+        // messages: a recap of the recent conversation beats summarizing a lone
+        // "lol" — or replying "1 message" and asking me to paste a log.
+        const rows = since.length >= 3 ? since : arr.slice(-50).map(fmt)
+        return { text: rows.join("\n"), count: rows.length }
     }
     // Date grouping for the message list: a stable YYYYMMDD key per message, and
     // a friendly label (Today/Yesterday/weekday) for the section divider.

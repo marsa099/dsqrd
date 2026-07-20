@@ -173,8 +173,8 @@ def summarize(text, model):
     # and replying "I don't see a chat log, paste it".
     prompt = (
         "Catch me up on a Discord channel. Everything between the markers below is "
-        "the chat log — everything posted since my last message there. Give me a "
-        "short catch-up summary: main topics, who said what that matters, and "
+        "a chat log of the recent conversation in the channel. Give me a short "
+        "catch-up summary: main topics, who said what that matters, and "
         "anything directed at me or that I should act on. Answer in the same "
         "language as the chat. The log may be very short — even a single line — "
         "just summarize whatever is there; never ask me to paste anything, the log "

@@ -27,8 +27,8 @@ Item {
     // one-line log with "I don't see a chat log, paste it".
     readonly property string _instr:
         "Catch me up on a Discord channel. Everything between the markers below is "
-      + "the chat log — everything posted since my last message there. Give me a "
-      + "short catch-up summary: main topics, who said what that matters, and "
+      + "a chat log of the recent conversation in the channel. Give me a short "
+      + "catch-up summary: main topics, who said what that matters, and "
       + "anything directed at me or that I should act on. Answer in the same "
       + "language as the chat. The log may be very short — even a single line — "
       + "just summarize whatever is there; never ask me to paste anything, the log "
@@ -41,7 +41,7 @@ Item {
         sourceCount = c.count
         if (c.count === 0) {
             phase = "ready"
-            result = "Du är helt ikapp — inget nytt sedan ditt senaste meddelande här. ✨"
+            result = "Inget att sammanfatta i den här kanalen än. ✨"
             return
         }
         phase = "loading"
