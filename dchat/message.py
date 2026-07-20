@@ -76,6 +76,7 @@ def prepare_embeds(embeds, message_content):
                 proxy_url = embed["image"]["proxy_url"]
                 hw = (embed["image"]["height"], embed["image"]["width"])
             media.append(True)
+        video_url = None
         if "video" in embed and "url" in embed["video"]:
             if "youtube." not in embed["video"]["url"]:
                 content.append(embed["video"]["url"])
@@ -84,6 +85,10 @@ def prepare_embeds(embeds, message_content):
             if not proxy_url and "proxy_url" in embed["video"]:
                 proxy_url = embed["video"]["proxy_url"]
                 hw = (embed["video"]["height"], embed["video"]["width"])
+            # keep the playable stream separately — for gifv (Tenor/KLIPY/…) the
+            # page link occupies main_url and the thumbnail occupies proxy_url,
+            # so without this the video itself is dropped
+            video_url = embed["video"].get("proxy_url") or embed["video"]["url"]
             media.append(True)
         if "footer" in embed and "text" in embed["footer"]:
             content.append(quote(embed["footer"]["text"]))
@@ -99,6 +104,7 @@ def prepare_embeds(embeds, message_content):
                 "main_url": main_url,
                 "proxy_url": proxy_url,
                 "hw": hw,
+                "video_url": video_url,
             }
             if embed_type == "rich":
                 ready_data["media"] = media

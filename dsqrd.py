@@ -189,6 +189,16 @@ def _derive_gif(url):
     return None
 
 
+def _qt_img(url):
+    """Inline display URL safe for this Qt build, which has no webp decoder.
+    Discord's media proxy transcodes on demand — ask it for png when the
+    inline path would be webp. Only for display paths; `full` keeps the
+    original (imv/mpv decode webp fine)."""
+    if url and ".webp" in _clean(url).lower() and re.search(r"(?:images-ext-\d+|media)\.discordapp\.net/", url):
+        return url + ("&" if "?" in url else "?") + "format=png"
+    return url
+
+
 def _fetch_text(url, cap=64 * 1024, show=4000):
     """Body of a small text attachment, truncated for display; "" on any failure."""
     try:
@@ -227,7 +237,12 @@ def map_embeds(m, content):
             # to the signed proxy/main so the image actually loads.
             src = url or proxy or main
             gif = t == "image/gif" or _clean(src).endswith((".gif", ".apng"))
-            imgs.append({"path": src, "full": src, "w": hw[1] or 0, "h": hw[0] or 0,
+            disp = src
+            if t == "image/webp" or _clean(src).lower().endswith(".webp"):
+                # signed attachment CDN doesn't transcode; its media.* twin does
+                disp = src.replace("cdn.discordapp.com", "media.discordapp.net")
+                disp = _qt_img(disp)
+            imgs.append({"path": disp, "full": src, "w": hw[1] or 0, "h": hw[0] or 0,
                          "id": mid, "ext": "", "type": "gif" if gif else "img", "pending": False})
             continue
         # uploaded video file (mimetype type video/*): placeholder card + play
@@ -273,7 +288,7 @@ def map_embeds(m, content):
         # link/media embed whose main image is a real image (unfurl image)
         if main and _looks_image(main):
             gif = _clean(main).endswith((".gif", ".apng"))
-            imgs.append({"path": proxy or main, "full": main, "w": hw[1] or 0, "h": hw[0] or 0,
+            imgs.append({"path": _qt_img(proxy or main), "full": main, "w": hw[1] or 0, "h": hw[0] or 0,
                          "id": mid, "ext": "", "type": "gif" if gif else "img", "pending": False})
             continue
         # gifv / video embed (Tenor, Giphy): Discord serves these as video, but
@@ -285,14 +300,21 @@ def map_embeds(m, content):
             # Derive the hosted .gif from the mp4 so it animates via AnimatedImage
             # (Discord gives no playable gif and there's no mp4 playback here).
             gif_url = _derive_gif(main or url)
+            vurl = e.get("video_url") or ""
             if gif_url:
                 imgs.append({"path": gif_url, "full": gif_url, "w": hw[1] or 0, "h": hw[0] or 0,
                              "id": mid, "ext": "", "type": "gif", "pending": False})
+            elif vurl and media:
+                # No derivable public .gif (KLIPY sits behind Cloudflare) but
+                # Discord proxies the mp4 — render the video card: transcoded
+                # poster inline, `v` plays the proxied stream in mpv.
+                imgs.append({"path": _qt_img(media), "full": vurl, "w": hw[1] or 0, "h": hw[0] or 0,
+                             "id": mid, "ext": "mp4", "type": "video", "pending": False})
             elif media and _looks_image(media):
                 # Static thumbnail (YouTube .jpg) → Image; routing stills through
                 # AnimatedImage made a later embed reuse an earlier one's frame.
                 gif = _clean(media).endswith((".gif", ".apng"))
-                imgs.append({"path": media, "full": media, "w": hw[1] or 0, "h": hw[0] or 0,
+                imgs.append({"path": _qt_img(media), "full": media, "w": hw[1] or 0, "h": hw[0] or 0,
                              "id": mid, "ext": "", "type": "gif" if gif else "img", "pending": False})
             continue
         # link/article/rich unfurl (GitHub, x.com, news, …): Discord proxies a
@@ -316,7 +338,7 @@ def map_embeds(m, content):
             continue
         if t in UNFURL_TYPES:
             if proxy and (hw[0] or hw[1]):
-                imgs.append({"path": proxy, "full": main or proxy, "w": hw[1] or 0, "h": hw[0] or 0,
+                imgs.append({"path": _qt_img(proxy), "full": main or proxy, "w": hw[1] or 0, "h": hw[0] or 0,
                              "id": mid, "ext": "", "type": "img", "pending": False})
             # url = "<link>\n> title\n> description". Drop the leading link line when the
             # body already has that link (the user posted the bare link; the embed just
