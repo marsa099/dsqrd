@@ -48,6 +48,21 @@ win_h=$(( screen_h * 85 / 100 ))
 # page between them.
 view_in_imv() {
     setsid -f imv -b "$bg" -W "$win_w" -H "$win_h" "$@" >/dev/null 2>&1
+    # With scaling_mode=shrink imv keeps the layout it computed for the
+    # REQUESTED size; when the compositor's real configure differs, small
+    # images land off-center (full-scaling used to re-center on rescale).
+    # Nudge a center once the window has settled.
+    (
+        # the imv binary is a launcher; the real process is imv-wayland.
+        # Rapid-fire: the first centers land inside niri's open animation,
+        # so the misplaced first layout is never actually seen; the late
+        # ones cover slow decodes.
+        for delay in 0.05 0.05 0.05 0.1 0.15 0.3 0.6; do
+            sleep "$delay"
+            pid=$(pgrep -n -x imv-wayland || pgrep -n -x imv)
+            [ -n "$pid" ] && imv-msg "$pid" center
+        done
+    ) >/dev/null 2>&1 &
 }
 
 view_in_mpv() {
@@ -105,9 +120,15 @@ case "$type" in
                 ;;
         esac
         ;;
-    video|audio)
-        # mpv plays both. niri floats it via the same app-id rule as imv.
+    video)
+        # niri floats it via the same app-id rule as imv.
         view_in_mpv "${files[@]}"
+        ;;
+    audio)
+        # voice notes: play ONCE (a looping voice note is noise); force a small
+        # window so there's something visible to replay (space) or close (q).
+        setsid -f mpv --no-terminal --force-window=immediate --keep-open=yes \
+            --loop-file=no --geometry="${win_w}x120" "${files[@]}" >/dev/null 2>&1
         ;;
     *)
         # YT or anything else — hand off to system default.

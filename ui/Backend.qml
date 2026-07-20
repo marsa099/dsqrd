@@ -204,7 +204,10 @@ Item {
     }
     function searchEmoji(q, limit) {
         q = (q || "").toLowerCase()
-        const cust = _emojiByWs[currentWorkspace] || ({})   // only this workspace's customs
+        // Slack customs are workspace-locked; Discord with Nitro can use any
+        // guild's customs anywhere (incl. DMs, where currentWorkspace is @me
+        // and the per-guild map is empty) — so dsqrd searches the merged map.
+        const cust = railHidden ? _emoji : (_emojiByWs[currentWorkspace] || ({}))
         if (!q) {
             const out = []
             const seen = ({})
@@ -379,8 +382,25 @@ Item {
     property bool   threadOpenToLatest: false  // true when opened to catch up replies (land at bottom)
     property string threadTitle: ""
     property bool   threadsView: false   // the dedicated Threads page is showing
-    function showThreadsView() { if (!hasThreads) return; threadsView = true; safeWrite(JSON.stringify({ type: "refreshThreads" }) + "\n") }
+    function showThreadsView() { if (!hasThreads) return; mentionsView = false; threadsView = true; safeWrite(JSON.stringify({ type: "refreshThreads" }) + "\n") }
     function hideThreadsView() { threadsView = false }
+
+    property bool   mentionsView: false   // the dedicated Mentions page is showing
+    property var    mentions: []
+    readonly property var currentMentions: (mentions || []).filter(m => m.workspace === currentWorkspace)
+    function showMentionsView() {
+        if (!hasThreads) return   // slack-only, like threads
+        threadsView = false
+        mentionsView = true
+        safeWrite(JSON.stringify({ type: "refreshMentions" }) + "\n")
+    }
+    function hideMentionsView() { mentionsView = false }
+    function openMention(m) {
+        if (!m) return
+        mentionsView = false
+        const isReply = m.threadTs && m.threadTs !== m.ts
+        openPermalink(m.channel, m.ts, isReply ? m.threadTs : "", m.workspace, "")
+    }
 
     // slkd pushes the workspace list first, then the channels.
     function setWorkspaces(list, rail, threads) {
@@ -524,8 +544,24 @@ Item {
             }
     }
 
+    // vim ctrl+o: bounce between the two most recent channels
+    property var lastChannel: null
+    function toggleLastChannel() {
+        const prev = lastChannel
+        if (!prev || !prev.id || prev.id === currentChannelId) { toast("no previous channel"); return }
+        if (prev.workspace && prev.workspace !== currentWorkspace) {
+            currentWorkspace = prev.workspace
+            rebuildChannelModel()
+        }
+        selectChannel(prev.id, prev.name, prev.topic)
+    }
+
     function selectChannel(id, name, topic) {
+        if (currentChannelId && currentChannelId !== id)
+            lastChannel = { id: currentChannelId, name: currentChannel,
+                            topic: currentTopic, workspace: currentWorkspace }
         threadsView = false   // opening a channel leaves the Threads page
+        mentionsView = false
         viewingNonMember = false   // a normal channel open clears any preview state
         currentChannelId = id
         currentChannel = name
@@ -698,6 +734,7 @@ Item {
                 rebuildChannelModel()
             }
             threadsView = false
+            mentionsView = false
             currentChannelId = channelId
             currentChannel = ch.name
             currentTopic = ch.topic || ""
@@ -755,6 +792,13 @@ Item {
         attachState = "uploading"; attachName = path.split("/").pop()
         safeWrite(JSON.stringify({ type: "uploadFile", channel: currentChannelId, path: path, thread: thread || "" }) + "\n")
     }
+    // The daemon asked (askCompress) before uploading an oversized image/video;
+    // yes → shrink under the size cap and stage the result.
+    function compressUpload(channel, thread, path) {
+        if (!channel || !path) return
+        attachState = "uploading"; attachName = path.split("/").pop()
+        safeWrite(JSON.stringify({ type: "compressUpload", channel: channel, path: path, thread: thread || "" }) + "\n")
+    }
     function dropAttach() {
         if (attachState === "none") return
         attachState = "none"; attachName = ""
@@ -766,6 +810,8 @@ Item {
     // A staged attachment finished uploading — drop into the composer so a bare
     // Enter sends it (handy for the u/U keybinds triggered from normal mode).
     signal attachSettled()
+    // Daemon found an oversized image/video and wants a yes/no on compressing.
+    signal askCompress(var info)
 
     // --- optimistic send: show your message instantly, reconcile with the echo ---
     property var _selfProfile: null   // {author,initials,color,avatar} learned from your own messages
@@ -867,6 +913,29 @@ Item {
         const t = plainText(msg.text)
         if (t.length) { Quickshell.execDetached(["wl-copy", "--", t]); copiedTs = msg.ts; copiedClear.restart() }
     }
+    // Y: copy a link to the message. Both link shapes are constructible locally —
+    // Slack archives URLs from the workspace subdomain (in the workspaces payload),
+    // Discord from guild/channel/message ids.
+    function copyLink(msg) {
+        if (!msg || !msg.ts) return
+        let url = ""
+        if (railHidden) {
+            url = "https://discord.com/channels/" + (currentWorkspace || "@me") + "/" + currentChannelId + "/" + msg.ts
+        } else {
+            let sub = ""
+            for (let i = 0; i < workspaces.length; i++)
+                if (workspaces[i].id === currentWorkspace) { sub = workspaces[i].subdomain || ""; break }
+            if (!sub) { toast("Couldn't build link (no workspace subdomain)"); return }
+            url = "https://" + sub + ".slack.com/archives/" + currentChannelId + "/p" + msg.ts.replace(".", "")
+            // reply permalinks need the thread context to resolve in Slack
+            if (threadOpen && threadParentTs && msg.ts !== threadParentTs)
+                url += "?thread_ts=" + threadParentTs + "&cid=" + currentChannelId
+        }
+        Quickshell.execDetached(["wl-copy", "--", url])
+        copiedTs = msg.ts
+        copiedClear.restart()
+        toast("Link copied")
+    }
     // A deleted message (echoed back over the websocket) — drop it everywhere.
     function applyDelete(channelId, ts) {
         const arr = _store[channelId]
@@ -928,7 +997,10 @@ Item {
     function sendReplyTo(ts, text) {
         const t = (text || "").trim()
         if ((t.length === 0 && attachState === "none") || !ts) return
-        safeWrite(JSON.stringify({ type: "send", channel: currentChannelId, text: resolveMentions(t), thread: ts }) + "\n")
+        // Slack thread replies from the channel composer broadcast back to the
+        // channel — the reply stays visible where you sent it from. Discord
+        // sends `thread` as a plain reply reference and ignores the flag.
+        safeWrite(JSON.stringify({ type: "send", channel: currentChannelId, text: resolveMentions(t), thread: ts, broadcast: hasThreads }) + "\n")
         clearAttach()
         sentMessage()
     }
@@ -980,12 +1052,24 @@ Item {
         else if (e.type === "delete") applyDelete(e.channel, e.ts)
         else if (e.type === "browse") { browseResults = e.channels || []; browseLoaded() }
         else if (e.type === "toast") { if (e.text) toast(e.text) }
+        else if (e.type === "resync") {
+            // daemon woke from suspend or its gateway re-identified: events
+            // from the gap were never delivered — refetch what's on screen
+            // (the recent reply resets the model)
+            if (currentChannelId !== "") {
+                safeWrite(JSON.stringify({ type: "recent", channel: currentChannelId }) + "\n")
+                if (threadOpen && threadParentTs)
+                    safeWrite(JSON.stringify({ type: "replies", channel: currentChannelId, thread: threadParentTs }) + "\n")
+            }
+        }
         else if (e.type === "channels") setChannels(e.channels, e.subThreads)
+        else if (e.type === "mentions") mentions = e.items || []
         else if (e.type === "recent") {
             // A jump into a channel we haven't joined: adopt it now that its
             // window has arrived (the view wasn't switched up front).
             if (e.jump && e.channel !== currentChannelId && _findChannel(e.channel) === null) {
                 threadsView = false
+                mentionsView = false
                 currentChannelId = e.channel
                 currentChannel = e.channelName ? ("#" + e.channelName) : e.channel
                 currentTopic = ""
@@ -1034,6 +1118,29 @@ Item {
             statusGen++
         }
         else if (e.type === "reactors") applyReactors(e.ts, e.reactions)
+        else if (e.type === "voice") {
+            voiceState = e.state || "idle"
+            if (voiceState === "recording") voiceStartedAt = Date.now()
+        }
+        else if (e.type === "gifs") gifsReady(e.gen || 0, e.items || [])
+        else if (e.type === "gifPreview") gifPreviewReady(e.gen || 0, String(e.id || ""), e.path || "")
+        else if (e.type === "playback") {
+            if (e.state === "playing") playingId = String(e.id || "")
+            else if (String(e.id || "") === playingId) playingId = ""
+        }
+        else if (e.type === "profile") {
+            if (String(e.user || "") === profileUser) {
+                profileData = e.profile || ({})
+                profileOpen = true
+            }
+        }
+        else if (e.type === "askCompress") {
+            // oversized image/video — clear the optimistic chip and let the UI
+            // ask; a yes routes back through compressUpload()
+            attachState = "none"; attachName = ""
+            askCompress({ channel: e.channel, thread: e.thread || "", path: e.path,
+                          name: e.name || "file", mb: e.mb || 0 })
+        }
         else if (e.type === "attachUploading") {
             // Daemon found a clipboard image and began uploading → show the
             // "uploading" chip now. Text pastes never reach here, so no false flash.
@@ -1046,7 +1153,12 @@ Item {
             // still awaiting the Ctrl+V result → paste the clipboard text instead.
             if (e.ok) { attachState = "ready"; attachName = e.name || "file"; attachSettled() }
             else if (_awaitingPaste) pasteFallback()
-            else attachState = "none"
+            else {
+                attachState = "none"
+                // failed uploads used to clear the chip silently — surface the
+                // daemon's reason so a rejected file isn't a mystery
+                if (e.err) toast(e.err)
+            }
             _awaitingPaste = false
         }
     }
@@ -1061,7 +1173,7 @@ Item {
             currentWorkspace = workspace
             rebuildChannelModel()
             selectChannel(id, ch.name, ch.topic)
-        } else if (id !== currentChannelId || threadsView) {
+        } else if (id !== currentChannelId || threadsView || mentionsView) {
             selectChannel(id, ch.name, ch.topic)
         } else {
             // Already viewing this channel — it's live, so skip the clear +
@@ -1084,7 +1196,7 @@ Item {
     // Tell slkd what channel we're viewing so it suppresses notifications for
     // it while the window is focused (slkd tracks focus via niri's event stream).
     function sendFocus() {
-        safeWrite(JSON.stringify({ type: "focus", channel: threadsView ? "" : currentChannelId }) + "\n")
+        safeWrite(JSON.stringify({ type: "focus", channel: (threadsView || mentionsView) ? "" : currentChannelId }) + "\n")
     }
 
     // Open a focused message's first image in the custom media viewer (same
@@ -1097,6 +1209,57 @@ Item {
     property bool mediaLoading: false
     property string mediaLoadingTs: ""   // ts of the message being opened → on-row "Opening media…" badge
     Timer { id: mediaLoadTimer; interval: 20000; onTriggered: { backend.mediaLoading = false; backend.toast("Media didn’t open — try again") } }
+
+    // Voice notes (Discord only): V records off the default mic, enter sends,
+    // esc cancels. The daemon owns the ffmpeg recording; we just mirror its state.
+    property string voiceState: "idle"   // idle | recording | sending
+    property double voiceStartedAt: 0
+    function voiceRecord() {
+        if (voiceState === "idle" && currentChannelId)
+            safeWrite(JSON.stringify({ type: "voiceStart", channel: currentChannelId }) + "\n")
+    }
+    function voiceSend() {
+        if (voiceState === "recording")
+            safeWrite(JSON.stringify({ type: "voiceStop", send: true }) + "\n")
+    }
+    function voiceCancel() {
+        if (voiceState === "recording")
+            safeWrite(JSON.stringify({ type: "voiceStop", send: false }) + "\n")
+    }
+    // In-line audio playback (voice notes): the daemon plays via ffplay, no
+    // window. The pill whose message id matches playingId renders accented.
+    property string playingId: ""
+    function playStop() {
+        if (playingId) safeWrite(JSON.stringify({ type: "playStop" }) + "\n")
+    }
+
+    // GIF browser (/gif in the composer, Discord only): Discord's /gifs API
+    // proxies the provider; sending a gif = sending its page URL as a message
+    // (the server unfurls it into the gifv embed we already render).
+    property int gifGen: 0
+    signal gifsReady(int gen, var items)
+    signal gifPreviewReady(int gen, string id, string path)
+    function searchGifs(q) {
+        gifGen++
+        safeWrite(JSON.stringify({ type: "gifs", q: q || "", gen: gifGen }) + "\n")
+        return gifGen
+    }
+
+    // Profile panel (slqs): Shift+P on a message opens the author's card in a
+    // right-hand panel. Opens only when the daemon's users.info answer lands,
+    // so the panel never shows an empty skeleton.
+    property bool profileOpen: false
+    property var  profileData: ({})
+    property string profileUser: ""
+    // one right-hand panel at a time: opening either closes the other
+    onProfileOpenChanged: if (profileOpen && threadOpen) closeThread()
+    onThreadOpenChanged: if (threadOpen) profileOpen = false
+    function openProfile(uid) {
+        if (!uid || railHidden) return
+        profileUser = uid
+        safeWrite(JSON.stringify({ type: "profile", workspace: currentWorkspace, user: uid }) + "\n")
+    }
+    function closeProfile() { profileOpen = false }
     // Media is often cached, so the download (view→viewReady) is instant — but the
     // viewer (mpv especially) still takes a beat to appear. Hold the indicator for a
     // grace window after viewReady so it's visible on cached opens too.
@@ -1111,6 +1274,14 @@ Item {
         const items = imgs.map(function (i) {
             return { id: i.id, url: i.full, ext: i.ext, type: i.type }
         })
+        // A lone audio (voice note) plays IN-LINE: the daemon runs ffplay, the
+        // pill accents while playing. v again (or q) stops. No viewer window.
+        if (items.length === 1 && items[0].type === "audio") {
+            if (playingId === String(items[0].id)) playStop()
+            else safeWrite(JSON.stringify({ type: "play", channel: currentChannelId,
+                id: items[0].id, url: items[0].url, ext: items[0].ext }) + "\n")
+            return
+        }
         // Images alone arrow in imv. Anything with a video goes to mpv as one
         // playlist (stills + videos, < / > to step) so a mixed message is
         // navigable in a single viewer; a lone video keeps the plain mpv path.
@@ -1443,7 +1614,7 @@ Item {
     }
 
     function safeWrite(s) {
-        if (sock.connected) sock.write(s)
+        if (sock && sock.connected) sock.write(s)
         else reconnect.restart()   // kick a reconnect; the user can retry
     }
 
@@ -1453,49 +1624,53 @@ Item {
         safeWrite(JSON.stringify({ type: "checkUpdate" }) + "\n")
     }
 
-    Socket {
-        id: sock
-        path: Quickshell.env("XDG_RUNTIME_DIR") + "/" + (Quickshell.env("SLK_SOCK") || "slqs") + ".sock"
-        connected: true
-        parser: SplitParser { onRead: data => backend.onEvent(data) }
-        onConnectionStateChanged: {
-            if (!connected) { reconnect.restart(); return }
-            // On (re)connect slkd re-sends the channel list; refresh the open
-            // channel's messages (and thread) too — a slkd restart drops the
-            // socket and would otherwise leave a stale/empty view.
-            if (backend.currentChannelId !== "")
-                safeWrite(JSON.stringify({ type: "recent", channel: backend.currentChannelId }) + "\n")
-            if (backend.threadOpen && backend.threadParentTs !== "")
-                safeWrite(JSON.stringify({ type: "replies", channel: backend.currentChannelId, thread: backend.threadParentTs }) + "\n")
+    // The daemon socket is created fresh on every re-dial: a Socket whose FIRST
+    // connect failed (daemon still bootstrapping, socket file absent) is wedged —
+    // toggling `connected` never dials again, and the window sits blank forever.
+    property var sock: null
+    Component {
+        id: sockComp
+        Socket {
+            path: Quickshell.env("XDG_RUNTIME_DIR") + "/" + (Quickshell.env("SLK_SOCK") || "slqs") + ".sock"
+            connected: true
+            parser: SplitParser { onRead: data => backend.onEvent(data) }
+            onConnectionStateChanged: {
+                if (!connected) { reconnect.restart(); return }
+                // On (re)connect slkd re-sends the channel list; refresh the open
+                // channel's messages (and thread) too — a slkd restart drops the
+                // socket and would otherwise leave a stale/empty view.
+                if (backend.currentChannelId !== "")
+                    backend.safeWrite(JSON.stringify({ type: "recent", channel: backend.currentChannelId }) + "\n")
+                if (backend.threadOpen && backend.threadParentTs !== "")
+                    backend.safeWrite(JSON.stringify({ type: "replies", channel: backend.currentChannelId, thread: backend.threadParentTs }) + "\n")
+            }
         }
     }
-    // Reconnect: re-dial whenever we haven't heard from slkd recently. lastRecv starts
-    // at 0, so a cold start re-dials immediately instead of sitting empty until you
-    // reopen the window — `sock.connected` can read true after a failed connect (so
-    // checking it misses the case), and seeding lastRecv to launch time delayed the
-    // staleness path for 8s. slkd pings every 3s; 8s of silence = dead/never-connected.
-    // Toggle connected false→true across two ticks to force a real re-dial (doing both
-    // at once races the disconnect against the connect).
+    function _redial() {
+        if (sock) sock.destroy()
+        sock = sockComp.createObject(backend)
+    }
+    Component.onCompleted: _redial()
+
+    // Re-dial whenever we haven't heard from the daemon recently. lastRecv starts
+    // at 0, so a cold start re-dials immediately instead of sitting empty until
+    // you reopen the window. The daemon pings every 3s; 8s of silence =
+    // dead/never-connected. A large tick gap means the session was frozen
+    // (suspend) — re-dial for a fresh bootstrap even if the socket survived.
     Timer {
         id: reconnect
         interval: 1000; repeat: true; running: true
-        property bool dropping: false
-        property bool forceRedial: false
         property double lastTick: 0
+        property int cooldown: 0
         onTriggered: {
             const now = Date.now()
-            // Large gap = session was frozen (suspend); the socket survives so
-            // staleness won't fire — force a re-dial for a fresh bootstrap.
-            if (lastTick > 0 && (now - lastTick) > 20000) forceRedial = true
+            const frozen = lastTick > 0 && (now - lastTick) > 20000
             lastTick = now
-            if (forceRedial) {
-                if (!dropping) { sock.connected = false; dropping = true }
-                else { sock.connected = true; dropping = false; forceRedial = false }
-                return
+            if (cooldown > 0 && !frozen) { cooldown--; return }
+            if (frozen || (now - backend.lastRecv) > 8000) {
+                backend._redial()
+                cooldown = 3   // give the fresh socket a few seconds to produce data
             }
-            if ((now - backend.lastRecv) <= 8000) { dropping = false; return }
-            if (!dropping) { sock.connected = false; dropping = true }
-            else { sock.connected = true; dropping = false }
         }
     }
 }

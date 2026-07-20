@@ -31,11 +31,15 @@ Rectangle {
     // backgrounded, so insert mode (and the hidden line numbers) persist instead
     // of snapping back to normal mode just because you switched apps.
     property alias inputHasFocus: input.focus
+    signal gifCommand(string q)     // `/gif [query]` typed + entered (Discord only)
     property string editingTs: ""   // non-empty while editing an existing message
     property string replyTs: ""     // non-empty while replying to a message
     property string replyAuthor: ""
     function focusInput() { input.forceActiveFocus() }
     function send() {
+        // `/gif [query]` opens the GIF browser instead of sending
+        const gm = Backend.railHidden ? input.text.match(/^\/gif(?:\s+(.*))?$/) : null
+        if (gm) { const q = (gm[1] || "").trim(); input.clear(); ac.reset(); root.gifCommand(q); return }
         if (editingTs !== "") { Backend.editMessage(editingTs, input.text); editingTs = "" }
         else if (replyTs !== "") { Backend.sendReplyTo(replyTs, input.text); replyTs = ""; replyAuthor = "" }
         else Backend.sendMessage(input.text)
@@ -50,10 +54,15 @@ Rectangle {
         input.cursorPosition = input.text.length
         input.forceActiveFocus()
     }
-    // `R` on a focused message → reply to it (Discord reply / Slack thread reply).
+    // `R` on a focused message → reply to it (Discord reply / Slack thread
+    // reply that broadcasts back to the channel — quick reply without opening
+    // the panel). On a message already in a thread, target the PARENT so the
+    // reply continues that thread instead of nesting one on the broadcast copy.
     function startReply(msg) {
         if (!msg || !msg.ts) return
-        editingTs = ""; replyTs = msg.ts; replyAuthor = msg.author || ""
+        editingTs = ""
+        replyTs = (Backend.hasThreads && msg.thread_ts) ? msg.thread_ts : msg.ts
+        replyAuthor = msg.author || ""
         input.forceActiveFocus()
     }
     function cancelEdit() { editingTs = ""; replyTs = ""; replyAuthor = ""; input.clear() }
@@ -75,7 +84,8 @@ Rectangle {
         anchors.top: parent.top; anchors.topMargin: 8
         spacing: 6
         Text { renderType: Text.NativeRendering; anchors.verticalCenter: parent.verticalCenter
-               text: root.editingTs !== "" ? "✎  Editing message" : ("↰  Replying to " + root.replyAuthor)
+               text: root.editingTs !== "" ? "✎  Editing message"
+                   : ("↰  Replying to " + root.replyAuthor + (Backend.hasThreads ? "  ·  in thread + channel" : ""))
                color: root.inkFg
                font.family: Theme.fontFamily; font.hintingPreference: Font.PreferNoHinting; font.pixelSize: 13 }
         Text { renderType: Text.NativeRendering; anchors.verticalCenter: parent.verticalCenter
@@ -134,7 +144,14 @@ Rectangle {
                            : "Message #" + Backend.currentChannel
             placeholderTextColor: root.inkMuted
             background: null
-            onTextChanged: { ac.update(); if (text.length > 0) Backend.notifyTyping() }
+            onTextChanged: {
+                // `/gif ` opens the GIF browser the moment the space lands —
+                // anything after it seeds the query (typing continues in the
+                // picker's own search field)
+                const gm = Backend.railHidden ? text.match(/^\/gif\s(.*)$/) : null
+                if (gm) { const q = gm[1].trim(); input.clear(); ac.reset(); root.gifCommand(q); return }
+                ac.update(); if (text.length > 0) Backend.notifyTyping()
+            }
             onCursorPositionChanged: ac.update()
             Keys.onPressed: e => {
                 // Ctrl+V routes through the daemon: image → attach, else pasteFallback

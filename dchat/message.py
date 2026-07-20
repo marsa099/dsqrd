@@ -41,6 +41,25 @@ def prepare_embeds(embeds, message_content):
         media = []
         embed_type = embed.get("type", "unknown")
 
+        # music services (Spotify/Apple Music/SoundCloud): emit a structured card
+        # (art + title + artist) instead of folding title into text + a big square.
+        prov_name = (embed.get("provider") or {}).get("name", "")
+        eurl = embed.get("url", "")
+        if prov_name in ("Spotify", "SoundCloud", "Apple Music", "Deezer", "TIDAL", "Bandcamp") \
+                or "open.spotify.com" in eurl or "music.apple.com" in eurl:
+            thumb = embed.get("thumbnail") or {}
+            ready_embeds.append({
+                "type": "music", "name": None, "url": "", "main_url": eurl,
+                "proxy_url": thumb.get("proxy_url") or thumb.get("url") or "",
+                "hw": (thumb.get("height", 0), thumb.get("width", 0)), "video_url": None,
+                "provider": prov_name or "Spotify",
+                "title": embed.get("title", ""),
+                "artist": (embed.get("author") or {}).get("name", "") or "",
+            })
+            # keep the link in the body: `o` opens it (spotify-player) and Discord
+            # itself shows link-plus-card too
+            continue
+
         if "url" in embed and "tenor.com/" not in embed["url"] and "giphy.com/" not in embed["url"]:
             # dont repeat unless its not discord attachment and handle x=twitter
             if (embed_type != "rich" and ".discordapp." not in embed["url"]) or embed["url"] not in message_content.replace("https://x.com", "https://twitter.com"):
@@ -76,6 +95,7 @@ def prepare_embeds(embeds, message_content):
                 proxy_url = embed["image"]["proxy_url"]
                 hw = (embed["image"]["height"], embed["image"]["width"])
             media.append(True)
+        video_url = None
         if "video" in embed and "url" in embed["video"]:
             if "youtube." not in embed["video"]["url"]:
                 content.append(embed["video"]["url"])
@@ -84,6 +104,10 @@ def prepare_embeds(embeds, message_content):
             if not proxy_url and "proxy_url" in embed["video"]:
                 proxy_url = embed["video"]["proxy_url"]
                 hw = (embed["video"]["height"], embed["video"]["width"])
+            # keep the playable stream separately — for gifv (Tenor/KLIPY/…) the
+            # page link occupies main_url and the thumbnail occupies proxy_url,
+            # so without this the video itself is dropped
+            video_url = embed["video"].get("proxy_url") or embed["video"]["url"]
             media.append(True)
         if "footer" in embed and "text" in embed["footer"]:
             content.append(quote(embed["footer"]["text"]))
@@ -99,6 +123,7 @@ def prepare_embeds(embeds, message_content):
                 "main_url": main_url,
                 "proxy_url": proxy_url,
                 "hw": hw,
+                "video_url": video_url,
             }
             if embed_type == "rich":
                 ready_data["media"] = media
@@ -234,6 +259,8 @@ def prepare_message(message):
             "url": attachment["url"],
             "proxy_url": attachment.get("proxy_url"),
             "hw": (attachment["height"], attachment["width"]) if "height" in attachment else None,
+            "duration_secs": attachment.get("duration_secs"),
+            "waveform": attachment.get("waveform"),
         })   # keep attachments in same place as embeds (attachments have no "main_url")
     message, embeds = content_to_attachment(message, embeds)
     # mentions

@@ -1491,12 +1491,37 @@ class Discord():
             gifs = []
             for gif in data:
                 gifs.append({
+                    "id": gif.get("id", ""),
+                    "title": gif.get("title", ""),
                     "url": gif["url"],
                     "webm": gif["src"],
                     "gif": gif["gif_src"],
+                    "width": gif.get("width", 0),
+                    "height": gif.get("height", 0),
                 })
             return gifs
         log_api_error(data, status, "search_gifs")
+        return []
+
+
+    def trending_gifs(self):
+        """Trending category tiles — the gif picker's empty-query state.
+
+        The provider's /trending returns a near-empty `gifs` list; the real
+        content is `categories` (hello, hug, …), each a drill-in that searches
+        its name. `src` is a preview gif for the tile."""
+        url = "/api/v9/gifs/trending?media_format=webm&provider=tenor&locale=en-US"
+        data, status = self.request("GET", url, None, self.header)
+        if not status:
+            return []
+        if status == 200:
+            data = json.loads(data)
+            cats = []
+            for c in data.get("categories", []):
+                if c.get("name"):
+                    cats.append({"name": c["name"], "src": c.get("src", "")})
+            return cats
+        log_api_error(data, status, "trending_gifs")
         return []
 
 
@@ -1625,9 +1650,10 @@ class Discord():
         return False
 
 
-    def send_voice_message(self, channel_id, path, reply_id=None, reply_channel_id=None, reply_guild_id=None, reply_ping=None):
+    def send_voice_message(self, channel_id, path, reply_id=None, reply_channel_id=None, reply_guild_id=None, reply_ping=None, waveform=None, duration=None):
         """Send voice message from file path, file must be ogg"""
-        waveform, duration = utils.get_audio_waveform(path)
+        if waveform is None:
+            waveform, duration = utils.get_audio_waveform(path)
         if not duration:
             logger.warning(f"Couldn't read voice message file: {path}")
         upload_data, status = self.request_attachment_url(channel_id, path, custom_name="voice-message.ogg")

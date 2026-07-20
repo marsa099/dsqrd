@@ -10,5 +10,7 @@ pkgs.mkShell {
       protobuf
       jeepney
     ]))
+    # the daemon shells out for upload compression and voice notes
+    pkgs.ffmpeg
   ];
 }

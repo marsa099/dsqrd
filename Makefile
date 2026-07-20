@@ -12,6 +12,7 @@ install:
 	chmod +x $(PREFIX)/bin/dsqrd
 	@echo "installed → $(PREFIX). run: dsqrd   ·   open the UI: SLK_SOCK=dsqrd qs -p $(PREFIX)/share/dsqrd/ui"
 	@echo "needs Python deps on PATH: websocket-client, pysocks, filetype, protobuf, jeepney"
+	@echo "needs binaries on PATH: ffmpeg + ffprobe (GIFs, voice notes), imagemagick, mpv, imv"
 	@echo "set SLK_UPDATE_CMD to your apply step for the in-app 'U' keybind."
 
 .PHONY: install

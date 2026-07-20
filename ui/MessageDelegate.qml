@@ -280,7 +280,12 @@ Item {
             spacing: 4; topPadding: del.images.length > 0 ? 2 : 0
             Repeater {
                 model: del.images
-                delegate: ClippingRectangle {
+                delegate: Rectangle {
+                    // Root is a plain Rectangle so TEXT children (file/audio/music
+                    // chips) render directly — routing them through a rounded-clip
+                    // FBO (ClippingRectangle) resampled them soft/unreadable at
+                    // fractional scale. Full-bleed images get their own clip below.
+                    id: pillRect
                     // index into del.images directly — a `modelData` here would
                     // collide with the message's modelData from the ListView.
                     required property int index
@@ -294,15 +299,23 @@ Item {
                     readonly property bool isVideo: img.type === "video"
                     // documents render as a compact chip, not an image frame
                     readonly property bool isFile: img.type === "file"
+                    // voice notes / audio uploads: playable pill (waveform + duration)
+                    readonly property bool isAudio: img.type === "audio"
+                    readonly property bool playing: isAudio && Backend.playingId === String(img.id || "")
+                    // music unfurls (Spotify …): compact card, art + title + artist
+                    readonly property bool isMusic: img.type === "music"
                     readonly property real ar: isVideo ? 0.5625 : ((img.w > 0 && img.h > 0) ? img.h / img.w : 0.66)
-                    width: isFile ? Math.ceil(fileRow.implicitWidth) + 24 : (isVideo ? Math.min(320, maxW) : Math.min(maxW, img.w || maxW))
-                    height: isFile ? 32 : width * ar
-                    border.width: isFile ? 1 : 0
+                    width: isFile ? Math.ceil(fileRow.implicitWidth) + 24
+                         : isAudio ? Math.ceil(audioRow.implicitWidth) + 26
+                         : isMusic ? Math.min(360, del.width - 80)
+                         : (isVideo ? Math.min(320, maxW) : Math.min(maxW, img.w || maxW))
+                    height: isFile ? 32 : isAudio ? 36 : isMusic ? 64 : width * ar
+                    border.width: (isFile || isAudio || isMusic) ? 1 : 0
                     border.color: Theme.hairlineSoft
 
                     Row {
                         id: fileRow
-                        visible: parent.isFile
+                        visible: pillRect.isFile
                         // integer anchoring: centerIn lands text on half-pixels
                         // and NativeRendering goes soft
                         anchors.left: parent.left; anchors.leftMargin: 12
@@ -331,40 +344,164 @@ Item {
                             font.family: Theme.fontFamily; font.pixelSize: 11
                         }
                     }
-                    HoverHandler { enabled: parent ? parent.isFile : false; cursorShape: Qt.PointingHandCursor }
+                    HoverHandler { enabled: pillRect.isFile; cursorShape: Qt.PointingHandCursor }
                     TapHandler {
-                        enabled: parent.isFile
+                        enabled: pillRect.isFile
                         onTapped: if (img.link) Qt.openUrlExternally(img.link)
                     }
-                    // gifs animate inline (AnimatedImage); stills use Image.
-                    // Only the matching element loads its source.
-                    Image {
-                        id: still
+                    Row {
+                        id: audioRow
+                        visible: pillRect.isAudio
+                        anchors.left: parent.left; anchors.leftMargin: 13
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: 9
+                        Icon {
+                            name: "microphone"; width: 14; height: 14
+                            color: pillRect.playing ? Theme.cursor : Theme.fg_secondary
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                        // Discord's waveform: base64 of u8 RMS buckets — downsample
+                        // to a fixed bar count so every pill has the same width.
+                        Row {
+                            visible: pillRect.isAudio && wfBars.length > 0
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: 2
+                            readonly property var wfBars: {
+                                const b64 = img.waveform || ""
+                                if (!b64) return []
+                                let raw
+                                try { raw = Qt.atob(b64) } catch (e) { return [] }
+                                if (!raw.length) return []
+                                const out = []
+                                for (let i = 0; i < 24; i++)
+                                    out.push(raw.charCodeAt(Math.min(raw.length - 1, Math.floor(i * raw.length / 24))) / 255)
+                                return out
+                            }
+                            Repeater {
+                                model: parent.wfBars
+                                delegate: Rectangle {
+                                    required property real modelData
+                                    width: 2; radius: 1
+                                    height: Math.max(3, Math.round(3 + modelData * 13))
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    color: pillRect.playing ? Theme.cursor : Theme.fg_secondary
+                                }
+                            }
+                        }
+                        // plain audio uploads have no waveform — show the filename
+                        Text {
+                            renderType: Text.QtRendering; renderTypeQuality: Text.VeryHighRenderTypeQuality
+                            visible: pillRect.isAudio && !(img.waveform || "")
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: img.name || "audio"
+                            color: Theme.fg
+                            font.family: Theme.fontFamily; font.pixelSize: 12; font.weight: 500
+                        }
+                        Text {
+                            renderType: Text.QtRendering; renderTypeQuality: Text.VeryHighRenderTypeQuality
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: {
+                                if (pillRect.playing) return "· q stops"
+                                const d = img.duration || 0
+                                return d > 0 ? Math.floor(d / 60) + ":" + ("0" + (d % 60)).slice(-2) : "· v plays"
+                            }
+                            color: Theme.fg_muted
+                            font.family: Theme.fontFamily; font.pixelSize: 11
+                            font.features: { "tnum": 1 }
+                        }
+                    }
+                    // music unfurl card: album art + title + artist + provider.
+                    Row {
+                        visible: pillRect.isMusic
                         anchors.fill: parent
-                        visible: img.type !== "gif"
-                        source: img.type !== "gif" ? (img.path || "") : ""
-                        fillMode: Image.PreserveAspectCrop; asynchronous: true; cache: true
-                        sourceSize.width: 760   // HiDPI-crisp at the inline cap
-                        // a load raced against the daemon's download fails once and
-                        // Qt never retries on its own — nudge it until the file lands
-                        property int retries: 0
-                        onStatusChanged: if (status === Image.Error && retries < 6) stillRetry.restart()
-                        Timer {
-                            id: stillRetry; interval: 700
-                            onTriggered: {
-                                still.retries++
-                                const s = still.source
-                                still.source = ""
-                                still.source = s
+                        anchors.margins: 8
+                        spacing: 10
+                        ClippingRectangle {
+                            width: 48; height: 48; radius: 6
+                            color: Theme.surface
+                            anchors.verticalCenter: parent.verticalCenter
+                            Image {
+                                anchors.fill: parent
+                                source: pillRect.isMusic ? (img.art || "") : ""
+                                fillMode: Image.PreserveAspectCrop
+                                asynchronous: true; cache: true
+                                sourceSize.width: 96; sourceSize.height: 96
+                            }
+                        }
+                        Column {
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: parent.width - 48 - parent.spacing
+                            spacing: 2
+                            Text {
+                                renderType: Text.QtRendering; renderTypeQuality: Text.VeryHighRenderTypeQuality
+                                width: parent.width; elide: Text.ElideRight
+                                text: img.title || ""
+                                color: Theme.fg
+                                font.family: Theme.fontFamily; font.pixelSize: 13; font.weight: 600
+                            }
+                            Text {
+                                renderType: Text.QtRendering; renderTypeQuality: Text.VeryHighRenderTypeQuality
+                                visible: (img.artist || "") !== ""
+                                width: parent.width; elide: Text.ElideRight
+                                text: img.artist || ""
+                                color: Theme.fg_secondary
+                                font.family: Theme.fontFamily; font.pixelSize: 12
+                            }
+                            Row {
+                                spacing: 5
+                                Rectangle {
+                                    width: 8; height: 8; radius: 4
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    color: (img.provider || "") === "Spotify" ? "#1DB954" : Theme.fg_muted
+                                }
+                                Text {
+                                    renderType: Text.QtRendering; renderTypeQuality: Text.VeryHighRenderTypeQuality
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: (img.provider || "Music") + "  ·  o opens"
+                                    color: Theme.fg_muted
+                                    font.family: Theme.fontFamily; font.pixelSize: 11
+                                }
                             }
                         }
                     }
-                    AnimatedImage {
+
+                    // Full-bleed image/gif: clipped for rounded corners (text
+                    // cards are NOT inside this, so they stay crisp).
+                    ClippingRectangle {
                         anchors.fill: parent
-                        visible: img.type === "gif"
-                        source: img.type === "gif" ? (img.path || "") : ""
-                        fillMode: Image.PreserveAspectCrop; cache: true
-                        playing: visible; speed: 1.0
+                        radius: pillRect.radius
+                        color: "transparent"
+                        visible: !pillRect.isFile && !pillRect.isAudio && !pillRect.isMusic
+                        // gifs animate inline (AnimatedImage); stills use Image.
+                        // Only the matching element loads its source.
+                        Image {
+                            id: still
+                            anchors.fill: parent
+                            visible: img.type !== "gif"
+                            source: visible ? (img.path || "") : ""
+                            fillMode: Image.PreserveAspectCrop; asynchronous: true; cache: true
+                            sourceSize.width: 760   // HiDPI-crisp at the inline cap
+                            // a load raced against the daemon's download fails once and
+                            // Qt never retries on its own — nudge it until the file lands
+                            property int retries: 0
+                            onStatusChanged: if (status === Image.Error && retries < 6) stillRetry.restart()
+                            Timer {
+                                id: stillRetry; interval: 700
+                                onTriggered: {
+                                    still.retries++
+                                    const s = still.source
+                                    still.source = ""
+                                    still.source = s
+                                }
+                            }
+                        }
+                        AnimatedImage {
+                            anchors.fill: parent
+                            visible: img.type === "gif"
+                            source: img.type === "gif" ? (img.path || "") : ""
+                            fillMode: Image.PreserveAspectCrop; cache: true
+                            playing: visible; speed: 1.0
+                        }
                     }
                     // video: still poster (via the Image above) with a play badge.
                     // Press `v` on the message to download + play it in mpv.

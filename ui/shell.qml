@@ -47,22 +47,28 @@ FloatingWindow {
     property bool search1: false   // /-search active (sidebar)
 
     readonly property bool isDiscord: Quickshell.env("SLK_SOCK") === "dsqrd"
-    // Collapsible sidebar (Discord: `b` toggles it for more message room).
-    property bool sidebarCollapsed: false   // `b` preference: keep the sidebar hidden
-    property bool sidebarHidden: false        // actual visual state (peeks open on h)
+    // Collapsible sidebar (Discord: `b` toggles it for more message room, and it
+    // auto-hides when the window gets too narrow to fit sidebar + a usable pane).
+    property bool sidebarCollapsed: false     // `b` preference: keep the sidebar hidden
+    property bool sidebarPeeking: false        // transient: h/Tab peeked it open
+    // 264 sidebar + ~296 for messages; below that the pane is unusable, so hide.
+    // Bind to appRoot.width (the fill item that tracks the real surface size) —
+    // FloatingWindow.width holds the requested/implicit size, not the live one.
+    readonly property bool tooNarrow: isDiscord && appRoot.width < 560
+    // Hidden when you asked for it (b) or there's no room (narrow) — unless you're
+    // currently peeking it open. A single source of truth the sidebar width binds to.
+    readonly property bool sidebarHidden: (sidebarCollapsed || tooNarrow) && !sidebarPeeking
     function toggleSidebar() {
         sidebarCollapsed = !sidebarCollapsed
-        sidebarHidden = sidebarCollapsed
+        sidebarPeeking = false
         // don't leave the keyboard on a now-zero-width pane
         if (sidebarHidden && focusedPanel === "sidebar") focusPanel("messages")
     }
 
     function focusPanel(name) {
-        // Peek a collapsed sidebar open when you move INTO it (h / Tab)…
-        if (name === "sidebar" && sidebarHidden) sidebarHidden = false
-        // …then collapse it again once you commit back to messages (picking a
-        // channel, l, etc.) — but only if you'd toggled it off with `b`.
-        if (name === "messages" && sidebarCollapsed) sidebarHidden = true
+        // Peek the sidebar open when you move INTO it (h / Tab); drop the peek once
+        // you commit back to messages so it re-collapses if b/narrow want it hidden.
+        sidebarPeeking = (name === "sidebar")
         focusedPanel = name
         sidebar.active = (name === "sidebar")
         // msgs.active / msgs.showNumbers are bound declaratively (below) so they
@@ -152,10 +158,13 @@ FloatingWindow {
     // a keyId, picks the table for the current mode, and dispatches. Adding a
     // binding = one line in the relevant table; no nested if/else.
     function closeThreadAction() { Backend.closeThread(); backToNormal() }
+    function closeProfileAction() { Backend.closeProfile(); backToNormal() }
 
     function currentMode() {
+        if (Backend.profileOpen) return "profile"
         if (Backend.threadOpen) return "thread"
         if (Backend.threadsView && focusedPanel === "messages") return "threadsPage"
+        if (Backend.mentionsView && focusedPanel === "messages") return "mentionsPage"
         return "channel"
     }
 
@@ -180,11 +189,22 @@ FloatingWindow {
                 case Qt.Key_E: return "ctrl+e"
                 case Qt.Key_Y: return "ctrl+y"
                 case Qt.Key_S: return "ctrl+s"
+                case Qt.Key_O: return "ctrl+o"
                 case Qt.Key_I: return "ctrl+i"
             }
             return ""   // unmapped ctrl combo → ignore
         }
         return e.text   // j k h l g i q /
+    }
+
+    // ctrl+s: with exactly two workspaces a picker is ceremony — flip straight
+    // to the other one; three or more still get the picker.
+    function switchWorkspaceOrPick() {
+        if (Backend.workspaces.length === 2) Backend.cycleWorkspace(1)
+        else workspacePicker.show()
+    }
+    function switchWorkspaceHelp(kind) {
+        return (Backend.workspaces.length === 2 ? "Toggle " : "Switch ") + kind
     }
 
     // Each entry is { act, help, cat }: `act` runs on the key (routeKey calls it),
@@ -219,8 +239,9 @@ FloatingWindow {
             "d":        { act: () => { if (!Backend.railHidden) peoplePicker.showDM() }, help: () => Backend.railHidden ? "" : "Message someone", cat: "chats" },
             "I":        { act: () => { if (!Backend.railHidden) peoplePicker.showInvite() }, help: () => Backend.railHidden ? "" : "Invite to channel", cat: "chats" },
             "ctrl+k":   { act: () => palette.show(), help: "Jump palette", cat: "chats" },
+            "ctrl+o":   { act: () => Backend.toggleLastChannel(), help: "Last channel", cat: "chats" },
             "ctrl+i":   { act: () => Backend.gotoFirstUnread(), help: "Go to first unread", cat: "chats" },
-            "ctrl+s":   { act: () => workspacePicker.show(), help: () => Backend.railHidden ? "Switch server" : "Switch workspace", cat: "chats" },
+            "ctrl+s":   { act: () => switchWorkspaceOrPick(), help: () => switchWorkspaceHelp(Backend.railHidden ? "server" : "workspace"), cat: "chats" },
             // Directional panel focus, insert-mode friendly (the composer maps the
             // same chords through panelMove). Workspace switching stays on ctrl+s.
             "ctrl+l":   { act: () => focusPanel("messages"), help: "Focus messages", cat: "nav" },
@@ -234,6 +255,15 @@ FloatingWindow {
             "y":        { act: () => { if (focusedPanel === "messages") Backend.copyText(msgs.currentMessage()) }, help: "Copy text", cat: "msg" },
             "o":        { act: () => { if (focusedPanel === "messages") Backend.openChannelRef(msgs.currentMessage()) }, help: "Open link", cat: "msg" },
             "v":        { act: () => { if (focusedPanel === "messages") Backend.viewImage(msgs.currentMessage()) }, help: "View image", cat: "msg" },
+            // voice notes are Discord-only (Slack's clips API is closed)
+            "V":        { act: () => { if (win.isDiscord) Backend.voiceRecord() },
+                          help: () => win.isDiscord ? "Record voice note" : "", cat: "msg" },
+            // author actions are slqs-only (Discord lacks the daemon verbs)
+            "Y":        { act: () => { if (focusedPanel === "messages") Backend.copyLink(msgs.currentMessage()) }, help: "Copy message link", cat: "msg" },
+            "M":        { act: () => { if (!Backend.railHidden && focusedPanel === "messages") { const m = msgs.currentMessage(); if (m && m.uid) Backend.openDM(m.uid) } },
+                          help: () => Backend.railHidden ? "" : "DM author", cat: "msg" },
+            "P":        { act: () => { if (!Backend.railHidden && focusedPanel === "messages") { const m = msgs.currentMessage(); if (m && m.uid) Backend.openProfile(m.uid) } },
+                          help: () => Backend.railHidden ? "" : "View profile", cat: "msg" },
             // views & general
             "?":        { act: () => help.show(), help: "This help", cat: "view" },
             "ctrl+shift+r": { act: () => Backend.checkForUpdates(), help: "Check for updates", cat: "view" },
@@ -252,14 +282,20 @@ FloatingWindow {
             "ctrl+g": { act: () => thread.move(9999), help: "Jump to bottom", cat: "nav" },
             "enter":  { act: () => Backend.enterAction(thread.currentMessage()), help: "Open media/link", cat: "msg" },
             "v":      { act: () => Backend.viewImage(thread.currentMessage()), help: "View image", cat: "msg" },
+            "M":      { act: () => { if (!Backend.railHidden) { const m = thread.currentMessage(); if (m && m.uid) Backend.openDM(m.uid) } },
+                        help: () => Backend.railHidden ? "" : "DM author", cat: "msg" },
+            "P":      { act: () => { if (!Backend.railHidden) { const m = thread.currentMessage(); if (m && m.uid) Backend.openProfile(m.uid) } },
+                        help: () => Backend.railHidden ? "" : "View profile", cat: "msg" },
             "o":      { act: () => Backend.openChannelRef(thread.currentMessage()), help: "Open link", cat: "msg" },
             "r":      { act: () => reactTo(thread.currentMessage()), help: "React", cat: "msg" },
             "y":      { act: () => Backend.copyText(thread.currentMessage()), help: "Copy text", cat: "msg" },
+            "Y":      { act: () => Backend.copyLink(thread.currentMessage()), help: "Copy message link", cat: "msg" },
             "e":      { act: () => { const m = thread.currentMessage(); if (m && m.mine) thread.startEdit(m) }, help: "Edit your message", cat: "msg" },
             "D":      { act: () => askDelete(thread.currentMessage()), help: "Delete your message", cat: "msg" },
             "ctrl+k": { act: () => palette.show(), help: "Jump palette", cat: "chats" },
+            "ctrl+o": { act: () => Backend.toggleLastChannel(), help: "Last channel", cat: "chats" },
             "ctrl+i": { act: () => Backend.gotoFirstUnread(), help: "Go to first unread", cat: "chats" },
-            "ctrl+s": { act: () => workspacePicker.show(), help: "Switch workspace", cat: "chats" },
+            "ctrl+s": { act: () => switchWorkspaceOrPick(), help: () => switchWorkspaceHelp("workspace"), cat: "chats" },
             "u":      { act: () => win.openUpload(), help: "Attach a file", cat: "chats" },
             "U":      { act: () => win.uploadClipboardPath(), help: "Upload file path from clipboard", cat: "chats" },
             "ctrl+h": { act: () => closeThreadAction(), help: "Back to channel", cat: "nav" },
@@ -270,6 +306,14 @@ FloatingWindow {
             "?":      { act: () => help.show(), help: "This help", cat: "view" },
             "ctrl+shift+r": { act: () => Backend.checkForUpdates(), help: "Check for updates", cat: "view" },
             "esc":    { act: () => closeThreadAction(), help: "Close thread", cat: "view" },
+        },
+        "profile": {
+            "M":      { act: () => { const u = Backend.profileUser; closeProfileAction(); Backend.openDM(u) }, help: "DM them", cat: "profile" },
+            "q":      { act: () => closeProfileAction(), help: "Close profile", cat: "profile" },
+            "h":      { act: () => closeProfileAction(), help: "Back to channel", cat: "profile" },
+            "ctrl+h": { act: () => closeProfileAction(), help: "Back to channel", cat: "nav" },
+            "?":      { act: () => help.show(), help: "This help", cat: "view" },
+            "esc":    { act: () => closeProfileAction(), help: "Close profile", cat: "view" },
         },
         "threadsPage": {
             "j":      { act: () => threadsPage.move(1),  help: "Move down", cat: "nav" },
@@ -282,7 +326,7 @@ FloatingWindow {
             "h":      { act: () => focusPanel("sidebar"), help: "Focus sidebar", cat: "nav" },
             "ctrl+k": { act: () => palette.show(), help: "Jump palette", cat: "chats" },
             "ctrl+i": { act: () => Backend.gotoFirstUnread(), help: "Go to first unread", cat: "chats" },
-            "ctrl+s": { act: () => workspacePicker.show(), help: "Switch workspace", cat: "chats" },
+            "ctrl+s": { act: () => switchWorkspaceOrPick(), help: () => switchWorkspaceHelp("workspace"), cat: "chats" },
             // threads-view specific (feeds the THREADS section)
             "enter":  { act: () => threadsPage.openCurrent(), help: "Open thread", cat: "thread" },
             "D":      { act: () => { const t = Backend.currentSubThreads[threadsPage.currentIndex]
@@ -291,6 +335,21 @@ FloatingWindow {
             "?":      { act: () => help.show(), help: "This help", cat: "view" },
             "ctrl+shift+r": { act: () => Backend.checkForUpdates(), help: "Check for updates", cat: "view" },
             "esc":    { act: () => Backend.hideThreadsView(), help: "Close threads view", cat: "view" },
+        },
+        "mentionsPage": {
+            "j":      { act: () => mentionsPage.move(1),  help: "Move down", cat: "nav" },
+            "k":      { act: () => mentionsPage.move(-1), help: "Move up", cat: "nav" },
+            "g":      { act: () => mentionsPage.toTop(),    help: "Jump to top", cat: "nav" },
+            "G":      { act: () => mentionsPage.toBottom(), help: "Jump to bottom", cat: "nav" },
+            "ctrl+d": { act: () => mentionsPage.half(1),  help: "Half-page down", cat: "nav" },
+            "ctrl+u": { act: () => mentionsPage.half(-1), help: "Half-page up", cat: "nav" },
+            "h":      { act: () => focusPanel("sidebar"), help: "Focus sidebar", cat: "nav" },
+            "ctrl+k": { act: () => palette.show(), help: "Jump palette", cat: "chats" },
+            "enter":  { act: () => mentionsPage.openCurrent(), help: "Open mention", cat: "mention" },
+            "q":      { act: () => Backend.hideMentionsView(), help: "Close mentions view", cat: "mention" },
+            "?":      { act: () => help.show(), help: "This help", cat: "view" },
+            "ctrl+shift+r": { act: () => Backend.checkForUpdates(), help: "Check for updates", cat: "view" },
+            "esc":    { act: () => Backend.hideMentionsView(), help: "Close mentions view", cat: "view" },
         },
     })
 
@@ -319,6 +378,15 @@ FloatingWindow {
         }
         const id = keyId(e, ctrl)
         if (!id) return
+        // a live voice recording claims enter (send) and esc (cancel) before anything else
+        if (Backend.voiceState === "recording" && (id === "enter" || id === "esc")) {
+            if (id === "enter") Backend.voiceSend(); else Backend.voiceCancel()
+            e.accepted = true; return
+        }
+        // q stops in-line audio playback wherever you are
+        if (Backend.playingId && id === "q") {
+            Backend.playStop(); e.accepted = true; return
+        }
         // Ctrl+D/U must not multi-fire on a held/repeated press (one tap = one half-page)
         if (e.isAutoRepeat && (id === "ctrl+d" || id === "ctrl+u")) { e.accepted = true; return }
         // numeric count prefix (for j/k jumps like 15k); 0 only extends a count
@@ -365,14 +433,12 @@ FloatingWindow {
                     width: win.sidebarHidden ? 0 : 264
                     Behavior on width { PanelMotion {} }
                     onThreadsClicked: { Backend.showThreadsView(); win.focusPanel("messages") }
+                    onMentionsClicked: { Backend.showMentionsView(); win.focusPanel("messages") }
                     onWorkspacePickerRequested: workspacePicker.show()
                 }
 
                 Item {
                     width: parent.width - sidebar.width - rail.width; height: parent.height
-                    // Active panel gets the border; inactive dims slightly.
-                    opacity: (win.focusedPanel === "messages" || Backend.threadOpen) ? 1.0 : 0.8
-                    Behavior on opacity { NumberAnimation { duration: 120 } }
 
                     // focused-panel accent: full border (message pane, no thread open)
                     Rectangle {
@@ -422,6 +488,10 @@ FloatingWindow {
                                   topMargin: 6
                                   leftMargin: 4 + 8 * (1 - Math.min(1, sidebar.width / 264))
                                   rightMargin: 12; bottomMargin: 12 }
+                        // focused-panel accent: the mlqs inbox hairline
+                        border.width: 1
+                        border.color: (win.focusedPanel === "messages" && !Backend.threadOpen)
+                                    ? Theme.hairlineSoft : "transparent"
                     }
 
                     MessageList {
@@ -466,6 +536,7 @@ FloatingWindow {
                             onExitInsert: win.backToNormal()
                             onCopilotRequested: win.showCopilot()
                             onOpenPalette: palette.show()
+                            onGifCommand: (q) => gifPicker.show(q)
                             onPageScroll: (d) => win.halfPage(d)
                             onPanelMove: (d) => win.focusPanel(d < 0 ? "sidebar" : "messages")
                             // Clicking into the composer makes the messages panel the
@@ -508,6 +579,47 @@ FloatingWindow {
                         }
                     }
 
+                    // Voice-note badge — same grammar as the media badge: shows the
+                    // running recording (elapsed + the two live binds) or the send.
+                    Rectangle {
+                        id: voiceBadge
+                        z: 201
+                        visible: opacity > 0
+                        opacity: Backend.voiceState !== "idle" ? 1 : 0
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.bottom: footer.top; anchors.bottomMargin: 8
+                        width: vbRow.implicitWidth + 28; height: 32; radius: 8
+                        color: Theme.mode === "light" ? Theme.ink : Theme.fg
+                        border.width: 1; border.color: Theme.hairline
+                        Behavior on opacity { NumberAnimation { duration: 140 } }
+                        property int secs: 0
+                        Timer {
+                            interval: 1000; repeat: true; triggeredOnStart: true
+                            running: Backend.voiceState === "recording"
+                            onTriggered: voiceBadge.secs = Math.max(0, Math.round((Date.now() - Backend.voiceStartedAt) / 1000))
+                        }
+                        Row {
+                            id: vbRow; anchors.centerIn: parent; spacing: 8
+                            Rectangle {
+                                width: 8; height: 8; radius: 4; color: Theme.red
+                                anchors.verticalCenter: parent.verticalCenter
+                                SequentialAnimation on opacity {
+                                    running: Backend.voiceState === "recording"; loops: Animation.Infinite
+                                    NumberAnimation { from: 1; to: 0.25; duration: 550 }
+                                    NumberAnimation { from: 0.25; to: 1; duration: 550 }
+                                }
+                            }
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: Backend.voiceState === "sending" ? "Sending voice note…"
+                                    : "Recording  " + Math.floor(voiceBadge.secs / 60) + ":" + ("0" + (voiceBadge.secs % 60)).slice(-2) + "   ⏎ send · esc cancel"
+                                color: Theme.bg
+                                renderType: Text.NativeRendering
+                                font.family: Theme.fontFamily; font.hintingPreference: Font.PreferNoHinting; font.pixelSize: 13
+                            }
+                        }
+                    }
+
                     ThreadsPage {
                         id: threadsPage
                         anchors.fill: parent
@@ -515,6 +627,14 @@ FloatingWindow {
                         // backend without them (Discord)
                         visible: Backend.hasThreads && Backend.threadsView
                         active: Backend.hasThreads && Backend.threadsView && !Backend.threadOpen
+                        z: 4
+                    }
+
+                    MentionsPage {
+                        id: mentionsPage
+                        anchors.fill: parent
+                        visible: Backend.hasThreads && Backend.mentionsView
+                        active: Backend.hasThreads && Backend.mentionsView && !Backend.threadOpen
                         z: 4
                     }
 
@@ -535,6 +655,20 @@ FloatingWindow {
                         onOpenPalette: palette.show()
                         // H = back to the channel (closes the thread panel); L = rightmost, just normal mode.
                         onPanelMove: (d) => { if (d < 0) win.closeThreadAction(); else win.backToNormal() }
+                    }
+
+                    // Profile card panel (slqs): same slide-in grammar as the
+                    // thread panel, narrower. Only one right panel at a time —
+                    // Backend closes whichever other panel is open.
+                    ProfilePanel {
+                        id: profilePanel
+                        width: Math.min(420, parent.width * 0.44)
+                        anchors.top: parent.top; anchors.bottom: parent.bottom
+                        anchors.topMargin: 8; anchors.bottomMargin: 12
+                        x: Backend.profileOpen ? (parent.width - width - 12) : parent.width
+                        Behavior on x { PanelMotion {} }
+                        visible: !Backend.railHidden && x < parent.width - 1
+                        z: 6
                     }
                 }
             }
@@ -644,6 +778,12 @@ FloatingWindow {
                 onOpenChanged: if (!open) win.backToNormal()
             }
 
+            GifPicker {
+                id: gifPicker
+                z: 101
+                onOpenChanged: if (!open) win.backToNormal()
+            }
+
             BrowsePicker {
                 id: browse
                 z: 101
@@ -671,6 +811,24 @@ FloatingWindow {
                 property var target: null
                 onConfirmed: { if (target) Backend.unsubThread(target.channel, target.ts); target = null }
                 onOpenChanged: if (!open) win.backToNormal()
+            }
+
+            // Oversized image/video: the daemon asks before doing anything, so
+            // yes → compress-and-stage, no → nothing uploaded.
+            ConfirmDialog {
+                id: confirmCompress
+                z: 102
+                title: "Compress and send?"
+                property var target: null
+                onConfirmed: { if (target) Backend.compressUpload(target.channel, target.thread, target.path); target = null }
+                onOpenChanged: if (!open) { target = null; win.backToNormal() }
+                Connections {
+                    target: Backend
+                    function onAskCompress(info) {
+                        confirmCompress.target = info
+                        confirmCompress.ask(info.name + "  ·  " + info.mb + " MB → over Discord's 10 MB limit")
+                    }
+                }
             }
 
             KeybindHelp {

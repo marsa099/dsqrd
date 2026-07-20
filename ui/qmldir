@@ -6,9 +6,12 @@ MessageDelegate MessageDelegate.qml
 StatusEmoji StatusEmoji.qml
 Composer Composer.qml
 ThreadPanel ThreadPanel.qml
+ProfilePanel ProfilePanel.qml
 ChannelPalette ChannelPalette.qml
 ThreadsPage ThreadsPage.qml
+MentionsPage MentionsPage.qml
 EmojiPicker EmojiPicker.qml
+GifPicker GifPicker.qml
 Autocomplete Autocomplete.qml
 BrowsePicker BrowsePicker.qml
 PeoplePicker PeoplePicker.qml

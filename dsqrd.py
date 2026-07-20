@@ -10,16 +10,30 @@ but does not send, edit, react, or mark anything.
     python3 dqs.py          # connects via your stored Discord token
     socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/dqs.sock   # eyeball the stream
 """
+import array
+import atexit
+import base64
+import faulthandler
+import hashlib
+import html as _html
 import json
+import math
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import threading
 import time
+
+# The daemon died silently once (log just stopped) — make every exit path
+# leave a trace: segfaults dump all stacks, normal exits log that they happened.
+faulthandler.enable()
+atexit.register(lambda: print("dsqrd: process exiting", flush=True))
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 
@@ -29,6 +43,19 @@ from dchat.notifier import Notifier
 
 SOCK = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "dsqrd.sock")
 GIT_REV = os.environ.get("DSQRD_REV", "")   # baked build rev; empty on source runs
+
+
+def _have_ffmpeg():
+    """ffmpeg + ffprobe are hard runtime deps for gifs and voice notes: the
+    daemon transcodes provider webm/mp4 to gif (this Qt decodes neither), builds
+    voice waveforms, and records. The flake bundles them onto PATH; a bare
+    source run must supply them. Cached; re-probes only while still missing so a
+    late PATH fix is picked up without a restart."""
+    if getattr(_have_ffmpeg, "_ok", False):
+        return True
+    ok = bool(shutil.which("ffmpeg")) and bool(shutil.which("ffprobe"))
+    _have_ffmpeg._ok = ok
+    return ok
 
 
 def _data_dir():
@@ -178,6 +205,65 @@ def _derive_gif(url):
     return None
 
 
+def _qt_img(url):
+    """Inline display URL safe for this Qt build, which has no webp decoder.
+    Discord's media proxy transcodes on demand — ask it for png when the
+    inline path would be webp. Only for display paths; `full` keeps the
+    original (imv/mpv decode webp fine)."""
+    if url and ".webp" in _clean(url).lower() and re.search(r"(?:images-ext-\d+|media)\.discordapp\.net/", url):
+        return url + ("&" if "?" in url else "?") + "format=png"
+    return url
+
+
+SPOTIFY_RE = re.compile(r"https?://open\.spotify\.com/(?:intl-[a-z]+/)?(?:track|album|playlist|artist|episode|show)/[A-Za-z0-9]+[^\s]*")
+_OEMBED_CACHE = {}
+
+
+def _spotify_meta(url):
+    """Song, artist, and album art for a Spotify link from its page's OpenGraph
+    tags (no auth). Discord attaches embeds for album links but NOT track links
+    (it renders those client-side), so we fetch the metadata ourselves. The
+    og:description is "Artist · Album · Song · Year" — its first field is the
+    artist. Cached (incl. failures)."""
+    key = url.split("?")[0]
+    if key in _OEMBED_CACHE:
+        return _OEMBED_CACHE[key]
+    res = None
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            page = r.read(80000).decode("utf-8", "ignore")   # og tags live in <head>
+
+        def og(prop):
+            m = re.search(r'<meta property="' + prop + r'" content="([^"]*)"', page)
+            return _html.unescape(m.group(1)) if m else ""
+
+        title, art, desc = og("og:title"), og("og:image"), og("og:description")
+        artist = desc.split("·")[0].strip() if "·" in desc else ""
+        if title:
+            res = {"title": title, "artist": artist, "art": art}
+    except Exception:
+        res = None
+    _OEMBED_CACHE[key] = res
+    return res
+
+
+def _fetch_text(url, cap=64 * 1024, show=4000):
+    """Body of a small text attachment, truncated for display; "" on any failure."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            raw = r.read(cap + 1)
+        if len(raw) > cap:
+            return ""
+        txt = raw.decode("utf-8", "replace").strip()
+        if len(txt) > show:
+            txt = txt[:show].rstrip() + "\n…"
+        return txt
+    except Exception:
+        return ""
+
+
 def map_embeds(m, content):
     """Pull inline images/gifs and textual unfurls out of a normalized message.
 
@@ -200,7 +286,12 @@ def map_embeds(m, content):
             # to the signed proxy/main so the image actually loads.
             src = url or proxy or main
             gif = t == "image/gif" or _clean(src).endswith((".gif", ".apng"))
-            imgs.append({"path": src, "full": src, "w": hw[1] or 0, "h": hw[0] or 0,
+            disp = src
+            if t == "image/webp" or _clean(src).lower().endswith(".webp"):
+                # signed attachment CDN doesn't transcode; its media.* twin does
+                disp = src.replace("cdn.discordapp.com", "media.discordapp.net")
+                disp = _qt_img(disp)
+            imgs.append({"path": disp, "full": src, "w": hw[1] or 0, "h": hw[0] or 0,
                          "id": mid, "ext": "", "type": "gif" if gif else "img", "pending": False})
             continue
         # uploaded video file (mimetype type video/*): placeholder card + play
@@ -224,10 +315,35 @@ def map_embeds(m, content):
                 imgs.append({"path": thumb, "full": vurl, "w": hw[1] or 0, "h": hw[0] or 0,
                              "id": mid, "ext": ext, "type": "video", "pending": False})
             continue
+        # music unfurl (Spotify …): structured card — art + title + artist
+        if t == "music":
+            imgs.append({"type": "music", "art": proxy or main, "title": e.get("title", ""),
+                         "artist": e.get("artist", ""), "provider": e.get("provider", "Spotify"),
+                         "path": "", "full": main or "", "w": 0, "h": 0, "id": mid, "pending": False})
+            continue
+        # uploaded audio: voice messages arrive as audio/ogg attachments with
+        # duration+waveform (flags bit 8192 on the raw message); plain audio
+        # file uploads land here too. Render a playable pill; `v` downloads
+        # and plays via media-viewer.sh -> mpv.
+        if t.startswith("audio/"):
+            aurl = url or proxy or main
+            if aurl:
+                cu = _clean(aurl).lower()
+                ext = "ogg"
+                for cand in ("ogg", "opus", "mp3", "m4a", "wav", "flac"):
+                    if cu.endswith("." + cand):
+                        ext = cand
+                        break
+                imgs.append({"path": "", "full": aurl, "w": 0, "h": 0, "id": mid,
+                             "ext": ext, "type": "audio", "pending": False,
+                             "name": e.get("name") or "",
+                             "duration": int(round(e.get("duration_secs") or 0)),
+                             "waveform": e.get("waveform") or ""})
+            continue
         # link/media embed whose main image is a real image (unfurl image)
         if main and _looks_image(main):
             gif = _clean(main).endswith((".gif", ".apng"))
-            imgs.append({"path": proxy or main, "full": main, "w": hw[1] or 0, "h": hw[0] or 0,
+            imgs.append({"path": _qt_img(proxy or main), "full": main, "w": hw[1] or 0, "h": hw[0] or 0,
                          "id": mid, "ext": "", "type": "gif" if gif else "img", "pending": False})
             continue
         # gifv / video embed (Tenor, Giphy): Discord serves these as video, but
@@ -239,23 +355,46 @@ def map_embeds(m, content):
             # Derive the hosted .gif from the mp4 so it animates via AnimatedImage
             # (Discord gives no playable gif and there's no mp4 playback here).
             gif_url = _derive_gif(main or url)
+            vurl = e.get("video_url") or ""
             if gif_url:
                 imgs.append({"path": gif_url, "full": gif_url, "w": hw[1] or 0, "h": hw[0] or 0,
                              "id": mid, "ext": "", "type": "gif", "pending": False})
+            elif vurl and media:
+                # No derivable public .gif (KLIPY sits behind Cloudflare) but
+                # Discord proxies the mp4 — render the video card: transcoded
+                # poster inline, `v` plays the proxied stream in mpv.
+                imgs.append({"path": _qt_img(media), "full": vurl, "w": hw[1] or 0, "h": hw[0] or 0,
+                             "id": mid, "ext": "mp4", "type": "video", "pending": False,
+                             "gifv": True})   # upgradeable: queue_gifv converts to an inline gif
             elif media and _looks_image(media):
                 # Static thumbnail (YouTube .jpg) → Image; routing stills through
                 # AnimatedImage made a later embed reuse an earlier one's frame.
                 gif = _clean(media).endswith((".gif", ".apng"))
-                imgs.append({"path": media, "full": media, "w": hw[1] or 0, "h": hw[0] or 0,
+                imgs.append({"path": _qt_img(media), "full": media, "w": hw[1] or 0, "h": hw[0] or 0,
                              "id": mid, "ext": "", "type": "gif" if gif else "img", "pending": False})
             continue
         # link/article/rich unfurl (GitHub, x.com, news, …): Discord proxies a
         # preview image into proxy_url + hw while main_url is the article link.
         # Show that proxied image — it's a real image regardless of extension, so
         # don't gate it on _looks_image (GitHub's OG image has no extension).
+        # uploaded file that matched no media branch (message.txt overflow,
+        # pdf, zip, …) — without this the message renders completely blank.
+        # `name` is only set on real attachments, never on link embeds.
+        name = e.get("name")
+        if name and url:
+            # Discord converts >2000-char messages into a message.txt
+            # attachment: the file IS the message, so inline it. Signed CDN
+            # urls expire (~24h) — a failed fetch falls back to the chip.
+            if t.startswith("text/"):
+                txt = _fetch_text(url)
+                if txt:
+                    unfurls.append(f" {name}\n{txt}")
+                    continue
+            unfurls.append(f" {name}\n{url}")
+            continue
         if t in UNFURL_TYPES:
             if proxy and (hw[0] or hw[1]):
-                imgs.append({"path": proxy, "full": main or proxy, "w": hw[1] or 0, "h": hw[0] or 0,
+                imgs.append({"path": _qt_img(proxy), "full": main or proxy, "w": hw[1] or 0, "h": hw[0] or 0,
                              "id": mid, "ext": "", "type": "img", "pending": False})
             # url = "<link>\n> title\n> description". Drop the leading link line when the
             # body already has that link (the user posted the bare link; the embed just
@@ -270,6 +409,34 @@ def map_embeds(m, content):
             if u and u != (content or "").strip() and not (prose and prose[:40] in (content or "")):
                 unfurls.append(u)
     return imgs, unfurls
+
+
+def _voice_meta(path):
+    """Duration + Discord waveform (base64 u8 RMS buckets) for a voice note.
+    Stdlib+ffmpeg only — dchat's helper needs numpy/soundfile, not in our env."""
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", path],
+        capture_output=True, text=True).stdout.strip()
+    duration = float(out or 0)
+    raw = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", path, "-f", "s16le", "-ac", "1", "-ar", "8000", "-"],
+        capture_output=True).stdout
+    samples = array.array("h")
+    samples.frombytes(raw[: len(raw) // 2 * 2])
+    if not samples or not duration:
+        return "", duration
+    n = min(max(int(duration * 10), 32), 256)
+    chunk = max(1, len(samples) // n)
+    rms = []
+    for i in range(n):
+        seg = samples[i * chunk:(i + 1) * chunk]
+        if not seg:
+            break
+        rms.append(math.sqrt(sum(s * s for s in seg) / len(seg)))
+    peak = max(rms) or 1.0
+    wf = bytes(min(255, int(v / peak * 255)) for v in rms)
+    return base64.b64encode(wf).decode(), duration
 
 
 def initials(name):
@@ -350,9 +517,28 @@ def map_msg(m):
             rt = "(deleted message)"
         reply_text = rt[:90]
     imgs, unfurls = map_embeds(m, content)
+    # Spotify links Discord left un-embedded (track links especially — it renders
+    # those client-side) get a card synthesized from Spotify's oEmbed metadata.
+    if "open.spotify.com" in content:
+        carded = {i.get("full", "").split("?")[0] for i in imgs if i.get("type") == "music"}
+        for mo in SPOTIFY_RE.finditer(content):
+            u = mo.group(0)
+            if u.split("?")[0] in carded:
+                continue
+            meta = _spotify_meta(u)
+            if meta:
+                imgs.append({"type": "music", "art": meta.get("art", ""), "title": meta.get("title", ""),
+                             "artist": meta.get("artist", ""), "provider": "Spotify", "path": "", "full": u,
+                             "w": 0, "h": 0, "id": str(m.get("id", "")) + "-sp" + str(len(imgs)), "pending": False})
+                carded.add(u.split("?")[0])
     body = content
+    # a lone link that unfurled into an inline card/media (Spotify, gif, image)
+    # doesn't also need its raw URL shown as text — render just the card. `link`
+    # is still derived from the original content below, so `o` opens it.
+    if imgs and re.sub(r"https?://\S+", "", content).strip() == "":
+        body = ""
     if unfurls:
-        body = (body + "\n" + "\n".join(unfurls)).strip()
+        body = (body + ("\n" if body else "") + "\n".join(unfurls)).strip()
     rx = []
     for r in m.get("reactions", []) or []:
         eid = r.get("emoji_id")
@@ -404,6 +590,17 @@ class DQS:
         self.user_names = {}      # user id -> display name (for DM typing indicators)
         self.pending_attach = {}  # channel id -> uploaded attachment, sent with next message
         self.uploading = {}       # channel id -> Event set when an in-flight upload finishes
+        self.voice_proc = None    # ffmpeg recording process while a voice note is being taken
+        self.voice_channel = None
+        self.voice_path = "/tmp/dsqrd-voice.ogg"
+        self.voice_lock = threading.Lock()   # start/stop race → orphaned ffmpeg recorders
+        self.play_proc = None     # ffplay process while a voice note plays in-line
+        self.play_id = None       # message id being played (UI accents its pill)
+        self.play_lock = threading.Lock()
+        self.gif_gen = 0          # newest gif-browser request; stale conversions bail
+        self._gifv_busy = set()   # inline-gif conversions in flight (dest paths)
+        atexit.register(lambda: self.voice_proc and self.voice_proc.kill())
+        atexit.register(lambda: self.play_proc and self.play_proc.kill())
         self.conns = []
         self.lock = threading.Lock()
         self.update_event = None   # latest updateAvailable event, replayed to new clients
@@ -579,6 +776,8 @@ class DQS:
         for m in msgs:
             self.learn_participant(channel_id, m)
         out = [map_msg(m) for m in msgs]
+        for mm in out:
+            self.queue_gifv(channel_id, mm)
         out.reverse()  # API returns newest-first; client wants chronological
         if not out:
             self.write(conn, {"type": "recent", "channel": channel_id, "msgs": [], "reset": True, "final": True})
@@ -597,6 +796,8 @@ class DQS:
     def send_history(self, conn, channel_id, before):
         msgs = self.discord.get_messages(channel_id, num=50, before=before) or []
         out = [map_msg(m) for m in msgs]
+        for mm in out:
+            self.queue_gifv(channel_id, mm)
         out.reverse()
         self.write(conn, {"type": "history", "channel": channel_id, "msgs": out})
 
@@ -629,12 +830,18 @@ class DQS:
 
     # ---- write commands ----
     def _call(self, label, fn, *fargs):
-        """Run a write action in the background and log its result."""
+        """Run a write action in the background and log its result. Failures
+        also toast — a 413 (attachment over Discord's size cap) used to
+        vanish silently and the message just never appeared."""
+        act = label.split(" ")[0]
         try:
             r = fn(*fargs)
             print(f"dsqrd: {label} -> {'ok' if r else 'FAILED'} ({r!r})", flush=True)
+            if not r:
+                self.broadcast({"type": "toast", "text": f"{act} failed — Discord rejected it (attachment too large?)"})
         except Exception as e:
             print(f"dsqrd: {label} EXC {e!r}", flush=True)
+            self.broadcast({"type": "toast", "text": f"{act} failed: {e}"})
 
     def sub_emoji(self, text):
         """Picker/typed :name: → Discord <:name:id> for our known custom emoji."""
@@ -694,6 +901,240 @@ class DQS:
         if paths:
             self.write(conn, {"type": "viewReady", "paths": paths, "mediatype": mediatype})
 
+    def voice_start(self, conn, channel_id):
+        """Record a voice note off the default input (ffmpeg → ogg/opus)."""
+        with self.voice_lock:
+            if not channel_id or self.voice_proc:
+                return
+            try:
+                os.remove(self.voice_path)
+            except OSError:
+                pass
+            try:
+                # -t caps a forgotten recording; SIGINT on stop finalizes the ogg
+                proc = subprocess.Popen(
+                    ["ffmpeg", "-y", "-v", "error", "-f", "pulse", "-i", "default",
+                     "-ac", "1", "-ar", "48000", "-c:a", "libopus", "-b:a", "48k",
+                     "-t", "600", self.voice_path],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except OSError:
+                self.write(conn, {"type": "toast", "text": "voice: ffmpeg not available"})
+                return
+            self.voice_proc, self.voice_channel = proc, channel_id
+        self.broadcast({"type": "voice", "state": "recording", "channel": channel_id})
+        time.sleep(0.25)   # ffmpeg exits instantly when there's no input source
+        if proc.poll() is not None and self.voice_proc is proc:
+            self.voice_proc = None
+            self.broadcast({"type": "voice", "state": "idle"})
+            self.write(conn, {"type": "toast", "text": "voice: recording failed (no input source?)"})
+
+    def voice_stop(self, conn, send):
+        """Stop the running recording; send it as a Discord voice message or discard."""
+        with self.voice_lock:
+            proc = self.voice_proc
+            if not proc:
+                return
+            self.voice_proc = None
+            ch = self.voice_channel
+        try:
+            if proc.poll() is None:
+                proc.send_signal(signal.SIGINT)
+            proc.wait(timeout=5)
+        except Exception:
+            proc.kill()
+        if not send:
+            self.broadcast({"type": "voice", "state": "idle"})
+            try:
+                os.remove(self.voice_path)
+            except OSError:
+                pass
+            return
+        self.broadcast({"type": "voice", "state": "sending"})
+        try:
+            if not (os.path.exists(self.voice_path) and os.path.getsize(self.voice_path) > 0):
+                self.write(conn, {"type": "toast", "text": "voice: nothing recorded"})
+                return
+            waveform, duration = _voice_meta(self.voice_path)
+            if duration < 1:
+                self.write(conn, {"type": "toast", "text": "voice: too short — not sent"})
+                return
+            if not self.discord.send_voice_message(ch, self.voice_path, waveform=waveform, duration=duration):
+                self.write(conn, {"type": "toast", "text": "voice: send failed"})
+        finally:
+            self.broadcast({"type": "voice", "state": "idle"})
+            try:
+                os.remove(self.voice_path)
+            except OSError:
+                pass
+
+    def queue_gifv(self, channel_id, mm):
+        """Upgrade gifv video-cards (KLIPY & co.) to inline animated gifs: the
+        card shows immediately, the proxied stream converts to a local gif off
+        this thread, then the message's images are live-replaced (the same
+        `images` mechanism slqs uses for unfurl updates)."""
+        if not _have_ffmpeg():
+            return   # leaves the (still-useful) video card; do_gifs warns loudly
+        try:
+            imgs = json.loads(mm.get("imagesJson") or "[]")
+        except Exception:
+            return
+        if any(i.get("gifv") for i in imgs):
+            threading.Thread(target=self._gifv_convert, args=(channel_id, mm["ts"], imgs), daemon=True).start()
+
+    def _gifv_convert(self, channel_id, ts, imgs):
+        d = os.path.expanduser("~/.cache/dsqrd/gifpicker")
+        os.makedirs(d, exist_ok=True)
+        changed = False
+        for i in imgs:
+            if not i.get("gifv"):
+                continue
+            key = hashlib.md5(i["full"].encode()).hexdigest()[:16] + "-inline"
+            dest = os.path.join(d, key + ".gif")
+            if not os.path.exists(dest):
+                if dest in self._gifv_busy:
+                    # another message shares this gif — wait for that conversion
+                    for _ in range(60):
+                        if os.path.exists(dest):
+                            break
+                        time.sleep(0.25)
+                    if not os.path.exists(dest):
+                        continue
+                else:
+                    self._gifv_busy.add(dest)
+                    src = os.path.join(d, key + ".src")
+                    try:
+                        req = urllib.request.Request(i["full"], headers={"User-Agent": self.user_agent})
+                        with urllib.request.urlopen(req, timeout=20) as r, open(src, "wb") as f:
+                            f.write(r.read())
+                        p = subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", src,
+                                            "-vf", "fps=15,scale=-2:280", "-loop", "0", dest],
+                                           capture_output=True)
+                        if p.returncode != 0 or not os.path.exists(dest):
+                            continue
+                    except Exception as e:
+                        print(f"dsqrd: gifv convert error {e!r}", flush=True)
+                        continue
+                    finally:
+                        self._gifv_busy.discard(dest)
+                        try:
+                            os.remove(src)
+                        except OSError:
+                            pass
+            u = "file://" + dest
+            i.update({"type": "gif", "path": u, "full": u, "ext": ""})
+            i.pop("gifv", None)
+            changed = True
+        if changed:
+            self.broadcast({"type": "images", "channel": channel_id, "ts": ts,
+                            "imagesJson": json.dumps(imgs)})
+
+    def do_gifs(self, conn, q, gen):
+        """GIF browser (/gif in the composer): Discord's /gifs API (KLIPY-backed).
+        The result list goes out immediately; previews convert webm -> small gif
+        (this Qt can't decode klipy's animated webp) and stream in progressively."""
+        from concurrent.futures import ThreadPoolExecutor
+        if not _have_ffmpeg():
+            self.write(conn, {"type": "gifs", "gen": gen, "items": []})
+            self.write(conn, {"type": "toast", "text": "GIFs need ffmpeg — it's missing from the daemon's PATH"})
+            print("dsqrd: ffmpeg/ffprobe not found — GIF browser and inline gifs disabled", flush=True)
+            return
+        self.gif_gen = gen
+        d = os.path.expanduser("~/.cache/dsqrd/gifpicker")
+        os.makedirs(d, exist_ok=True)
+        try:   # keep the preview cache bounded
+            fs = sorted((os.path.join(d, f) for f in os.listdir(d)), key=os.path.getmtime)
+            for f in fs[:-300]:
+                os.remove(f)
+        except OSError:
+            pass
+        if q:
+            items = self.discord.search_gifs(q)[:24]
+            # gif result: selecting it sends the page url
+            out = [{"id": g["id"] or g["url"], "title": g["title"], "url": g["url"],
+                    "w": g["width"], "h": g["height"], "media": g["webm"]} for g in items]
+        else:
+            # empty query = trending category tiles; selecting one searches its name
+            items = self.discord.trending_gifs()[:24]
+            out = [{"id": "cat:" + c["name"], "title": c["name"], "url": "",
+                    "category": True, "w": 0, "h": 0, "media": c["src"]} for c in items]
+        self.write(conn, {"type": "gifs", "gen": gen, "items": out})
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            for g in out:
+                ex.submit(self._gif_preview, conn, gen, d, g["id"], g["media"])
+
+    def _gif_preview(self, conn, gen, cachedir, item_id, media_url):
+        # ffmpeg reads gif (category tiles) and webm (search results) alike and
+        # normalizes both to a small looping gif Qt can animate.
+        if self.gif_gen != gen or not media_url:
+            return
+        key = hashlib.md5(media_url.encode()).hexdigest()[:16]
+        dest = os.path.join(cachedir, key + ".gif")
+        if not os.path.exists(dest):
+            src = os.path.join(cachedir, key + ".src")
+            try:
+                req = urllib.request.Request(media_url, headers={"User-Agent": self.user_agent})
+                with urllib.request.urlopen(req, timeout=15) as r, open(src, "wb") as f:
+                    f.write(r.read())
+                p = subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", src,
+                                    "-vf", "fps=12,scale=-2:180", "-loop", "0", dest],
+                                   capture_output=True)
+                if p.returncode != 0 or not os.path.exists(dest):
+                    return
+            except Exception as e:
+                print(f"dsqrd: gif preview error {e!r}", flush=True)
+                return
+            finally:
+                try:
+                    os.remove(src)
+                except OSError:
+                    pass
+        if self.gif_gen == gen:
+            self.write(conn, {"type": "gifPreview", "gen": gen,
+                              "id": item_id, "path": "file://" + dest})
+
+    def play_audio(self, conn, msg_id, url, ext):
+        """Play a voice note / audio attachment in-line (no window): download to
+        the view cache, play daemon-side via ffplay. The UI accents the pill off
+        the playback events; v again or q stops."""
+        viewdir = os.path.expanduser("~/.cache/dsqrd/view")
+        os.makedirs(viewdir, exist_ok=True)
+        dest = os.path.join(viewdir, f"{msg_id}-a.{ext or 'ogg'}")
+        try:
+            if not os.path.exists(dest):
+                req = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
+                with urllib.request.urlopen(req, timeout=20) as r, open(dest, "wb") as f:
+                    f.write(r.read())
+        except Exception as e:
+            print(f"dsqrd: play fetch error {e!r}", flush=True)
+            self.write(conn, {"type": "toast", "text": "couldn't fetch audio"})
+            return
+        with self.play_lock:
+            if self.play_proc and self.play_proc.poll() is None:
+                self.play_proc.terminate()   # its watcher broadcasts the old idle
+            try:
+                proc = subprocess.Popen(
+                    ["ffplay", "-nodisp", "-autoexit", "-loglevel", "error", dest],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except OSError:
+                self.write(conn, {"type": "toast", "text": "ffplay not available"})
+                return
+            self.play_proc, self.play_id = proc, msg_id
+        self.broadcast({"type": "playback", "state": "playing", "id": msg_id})
+        threading.Thread(target=self._watch_play, args=(proc, msg_id), daemon=True).start()
+
+    def _watch_play(self, proc, msg_id):
+        proc.wait()
+        with self.play_lock:
+            if self.play_proc is not proc:
+                return   # superseded by a newer play
+            self.play_proc = self.play_id = None
+        self.broadcast({"type": "playback", "state": "idle", "id": msg_id})
+
+    def play_stop(self):
+        with self.play_lock:
+            if self.play_proc and self.play_proc.poll() is None:
+                self.play_proc.terminate()   # watcher does cleanup + idle broadcast
+
     def set_presence(self, active):
         """Report desktop activity to Discord's gateway (op 3). afk=False while
         active holds mobile push (you see it on desktop); afk=True when idle lets
@@ -713,8 +1154,8 @@ class DQS:
         The image goes out with the next message. Reports progress via attachReady.
         `ev` (the in-flight-upload Event) is created and registered by the caller so
         a racing send waits for it; we just set() it when done (in finally)."""
-        def fail():
-            self.broadcast({"type": "attachReady", "channel": channel_id, "name": "", "ok": False})
+        def fail(reason=""):
+            self.broadcast({"type": "attachReady", "channel": channel_id, "name": "", "ok": False, "err": reason})
         try:
             types = subprocess.run(["wl-paste", "--list-types"], capture_output=True, text=True).stdout
             mime = next((m for m in ("image/png", "image/jpeg", "image/gif", "image/webp") if m in types), None)
@@ -733,7 +1174,7 @@ class DQS:
                 time.sleep(0.2)
             if not data:
                 print("dsqrd: clipboard image grab was empty", flush=True)
-                return fail()
+                return fail("clipboard image was empty")
             with open(tmp, "wb") as f:
                 f.write(data)
             # Show an "uploading" state + hand the UI the local file for the optimistic preview.
@@ -742,49 +1183,125 @@ class DQS:
             att, code = self.discord.request_attachment_url(channel_id, tmp)
             if code != 0 or not att:
                 print(f"dsqrd: attachment url failed (code {code})", flush=True)
-                return fail()
+                return fail("Discord refused the upload (too large?)")
             if not self.discord.upload_attachment(att["upload_url"], tmp):
                 print("dsqrd: upload failed", flush=True)
-                return fail()
+                return fail("upload failed")
             att["name"] = os.path.basename(tmp)
             att["_thread"] = thread or ""   # route to the thread it was staged in
             self.pending_attach[channel_id] = att
             self.broadcast({"type": "attachReady", "channel": channel_id, "name": att["name"], "ok": True})
         except Exception as e:
             print(f"dsqrd: upload error {e!r}", flush=True)
-            fail()
+            fail(f"upload failed: {e}")
         finally:
             ev.set()   # release any send that's waiting on this upload
+
+    def _compress_for_discord(self, path):
+        """Shrink an image/video under Discord's ~10 MB cap. Returns the new
+        path (in /tmp) or None if the type isn't compressible or it fails."""
+        ext = os.path.splitext(path)[1].lower()
+        out = os.path.join("/tmp", "dsqrd-compress-" + os.path.basename(path))
+        try:
+            if ext in (".mp4", ".mov", ".mkv", ".webm", ".m4v"):
+                out = os.path.splitext(out)[0] + ".mp4"
+                dur = subprocess.run(
+                    ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                     "-of", "default=noprint_wrappers=1:nokey=1", path],
+                    capture_output=True, text=True).stdout.strip()
+                dur = float(dur or 0) or 1.0
+                # aim ~8.5 MB total, 96k audio, 6% mux headroom
+                vbr = int((8.5 * 8 * 1024 * 1024 / dur * 0.94) - 96000) // 1000
+                vbr = max(200, vbr)
+                r = subprocess.run(
+                    ["ffmpeg", "-y", "-v", "error", "-i", path,
+                     "-c:v", "libx264", "-b:v", f"{vbr}k", "-maxrate", f"{vbr}k",
+                     "-bufsize", f"{vbr*2}k", "-preset", "medium", "-pix_fmt", "yuv420p",
+                     "-c:a", "aac", "-b:a", "96k", out])
+                if r.returncode != 0 or not os.path.exists(out):
+                    return None
+            elif ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+                out = os.path.splitext(out)[0] + ".jpg"
+                # cap the long edge and re-encode as jpeg; enough for screenshots
+                r = subprocess.run(
+                    ["magick", path, "-resize", "2560x2560>", "-quality", "82", out])
+                if r.returncode != 0 or not os.path.exists(out):
+                    return None
+            else:
+                return None
+            if os.path.getsize(out) / (1024 * 1024) > 10:
+                return None   # still too big — let the caller fall back to the toast
+            return out
+        except Exception as e:
+            print(f"dsqrd: compress error {e!r}", flush=True)
+            return None
+
+    def do_compress_upload(self, channel_id, thread, path, ev):
+        """Compress an oversized image/video, then hand off to the normal
+        staging upload. Runs on its own thread; ev released in the finally."""
+        try:
+            self.broadcast({"type": "toast", "text": "Compressing…"})
+            small = self._compress_for_discord(path)
+            if not small:
+                self.broadcast({"type": "attachReady", "channel": channel_id,
+                                "name": "", "ok": False, "err": "couldn't compress under 10 MB"})
+                return
+            self._stage_upload(channel_id, thread, small, os.path.basename(path))
+        finally:
+            ev.set()
+
+    COMPRESSIBLE = (".png", ".jpg", ".jpeg", ".webp", ".bmp",
+                    ".mp4", ".mov", ".mkv", ".webm", ".m4v")
 
     def do_upload_file(self, channel_id, thread, path, ev):
         """Upload a file from disk (any type). Same staging flow as the paste —
         the file goes out with the next message."""
-        def fail():
-            self.broadcast({"type": "attachReady", "channel": channel_id, "name": "", "ok": False})
+        def fail(reason=""):
+            self.broadcast({"type": "attachReady", "channel": channel_id, "name": "", "ok": False, "err": reason})
         try:
             if not path or not os.path.isfile(path):
                 print(f"dsqrd: uploadFile bad path {path!r}", flush=True)
-                return fail()
+                return fail("no file at that path")
             name = os.path.basename(path)
-            img = os.path.splitext(name)[1].lower() in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
-            self.broadcast({"type": "attachUploading", "channel": channel_id,
-                            "name": name, "path": ("file://" + path) if img else ""})
-            att, code = self.discord.request_attachment_url(channel_id, path)
-            if code != 0 or not att:
-                print(f"dsqrd: uploadFile attachment url failed (code {code})", flush=True)
-                return fail()
-            if not self.discord.upload_attachment(att["upload_url"], path):
-                print("dsqrd: uploadFile upload failed", flush=True)
-                return fail()
-            att["name"] = name
-            att["_thread"] = thread or ""   # route to the thread it was staged in
-            self.pending_attach[channel_id] = att
-            self.broadcast({"type": "attachReady", "channel": channel_id, "name": name, "ok": True})
+            mb = os.path.getsize(path) / (1024 * 1024)
+            # Discord caps uploads at 10 MB without nitro and rejects the SEND
+            # (413) after staging. If it's a compressible image/video, ask the
+            # UI whether to shrink it instead of uploading a doomed file.
+            if mb > 10:
+                if os.path.splitext(name)[1].lower() in self.COMPRESSIBLE:
+                    self.broadcast({"type": "askCompress", "channel": channel_id,
+                                    "thread": thread or "", "path": path,
+                                    "name": name, "mb": round(mb)})
+                    return
+                self.broadcast({"type": "attachReady", "channel": channel_id, "name": "",
+                                "ok": False, "err": f"{name} is {mb:.0f} MB — over Discord's 10 MB limit"})
+                return
+            self._stage_upload(channel_id, thread, path, name)
         except Exception as e:
             print(f"dsqrd: uploadFile error {e!r}", flush=True)
-            fail()
+            fail(f"upload failed: {e}")
         finally:
             ev.set()
+
+    def _stage_upload(self, channel_id, thread, path, name):
+        """Request an attachment URL, upload the bytes, stage for the next
+        send. `name` is the display name (may differ from a temp path)."""
+        def fail(reason=""):
+            self.broadcast({"type": "attachReady", "channel": channel_id, "name": "", "ok": False, "err": reason})
+        img = os.path.splitext(name)[1].lower() in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+        self.broadcast({"type": "attachUploading", "channel": channel_id,
+                        "name": name, "path": ("file://" + path) if img else ""})
+        att, code = self.discord.request_attachment_url(channel_id, path)
+        if code != 0 or not att:
+            print(f"dsqrd: attachment url failed (code {code})", flush=True)
+            return fail("Discord refused the upload (too large?)")
+        if not self.discord.upload_attachment(att["upload_url"], path):
+            print("dsqrd: upload failed", flush=True)
+            return fail("upload failed")
+        att["name"] = name
+        att["_thread"] = thread or ""   # route to the thread it was staged in
+        self.pending_attach[channel_id] = att
+        self.broadcast({"type": "attachReady", "channel": channel_id, "name": name, "ok": True})
 
     # ---- loops ----
     def drain_gateway(self):
@@ -819,15 +1336,31 @@ class DQS:
         if op in ("MESSAGE_CREATE", "MESSAGE_CREATE_QUICK", "MESSAGE_UPDATE"):
             if self.learn_participant(cid, m) and cid == self.active_ch:
                 self.broadcast({"type": "users", "users": self.users_payload(cid)})
+            mm = map_msg(m)
             self.broadcast({"type": "message", "workspace": ws, "channel": cid,
-                            "thread": "", "mention": False, "msg": map_msg(m)})
+                            "thread": "", "mention": False, "msg": mm})
+            self.queue_gifv(cid, mm)
             if op != "MESSAGE_UPDATE":
                 self.maybe_notify(m, cid, ws)
+                self.maybe_mark_active_read(cid, m)
         elif op == "MESSAGE_DELETE":
             self.broadcast({"type": "delete", "channel": cid, "ts": str(m.get("id"))})
         elif op in ("MESSAGE_REACTION_ADD", "MESSAGE_REACTION_REMOVE"):
             threading.Thread(target=self.refresh_reactions,
                              args=(cid, m.get("id")), daemon=True).start()
+
+    def maybe_mark_active_read(self, cid, m):
+        """Ack a live message on the server when it lands in the channel you're
+        actively viewing with the window focused — so reading on desktop clears
+        the unread on your phone too. Without this the client only acked on
+        channel-open, leaving messages read on desktop still badging mobile."""
+        if str(m.get("user_id")) == str(self.my_id):
+            return
+        if not (self.app_active and cid == self.active_ch):
+            return
+        mid = m.get("id")
+        if mid:
+            threading.Thread(target=self.discord.ack, args=(cid, str(mid)), daemon=True).start()
 
     def maybe_notify(self, m, cid, ws):
         """Fire a desktop notification for DMs and @mentions, unless it's the
@@ -957,6 +1490,18 @@ class DQS:
                     threading.Thread(target=self.do_view, args=(conn, imgs, cmd.get("mediatype", "img")), daemon=True).start()
                 elif t == "presence":
                     threading.Thread(target=self.set_presence, args=(cmd.get("state") != "idle",), daemon=True).start()
+                elif t == "gifs":
+                    threading.Thread(target=self.do_gifs,
+                                     args=(conn, str(cmd.get("q") or "").strip(), int(cmd.get("gen") or 0)), daemon=True).start()
+                elif t == "play" and cmd.get("url"):
+                    threading.Thread(target=self.play_audio,
+                                     args=(conn, str(cmd.get("id") or "a"), cmd["url"], cmd.get("ext", "")), daemon=True).start()
+                elif t == "playStop":
+                    threading.Thread(target=self.play_stop, daemon=True).start()
+                elif t == "voiceStart" and ch:
+                    threading.Thread(target=self.voice_start, args=(conn, ch), daemon=True).start()
+                elif t == "voiceStop":
+                    threading.Thread(target=self.voice_stop, args=(conn, bool(cmd.get("send"))), daemon=True).start()
                 elif t == "uploadClipboard" and ch:
                     # Register the upload synchronously so a "send" read next waits
                     # for the staged image instead of racing past it (text-only).
@@ -967,6 +1512,10 @@ class DQS:
                     ev = threading.Event()
                     self.uploading[ch] = ev
                     threading.Thread(target=self.do_upload_file, args=(ch, cmd.get("thread"), cmd.get("path"), ev), daemon=True).start()
+                elif t == "compressUpload" and ch:
+                    ev = threading.Event()
+                    self.uploading[ch] = ev
+                    threading.Thread(target=self.do_compress_upload, args=(ch, cmd.get("thread"), cmd.get("path"), ev), daemon=True).start()
                 elif t == "dropAttach" and ch:
                     self.pending_attach.pop(ch, None)
                 elif t == "reactors" and ch and cmd.get("ts"):
@@ -982,6 +1531,9 @@ class DQS:
         srv.bind(SOCK)
         srv.listen(8)
         print(f"dsqrd: streaming on {SOCK}", flush=True)
+        if not _have_ffmpeg():
+            print("dsqrd: WARNING — ffmpeg/ffprobe not on PATH; GIFs and voice "
+                  "messages will not work. Install the flake build or add ffmpeg.", flush=True)
         while True:
             conn, _ = srv.accept()
             with self.lock:
@@ -1076,6 +1628,28 @@ class DQS:
             if self._status_snap:
                 self.broadcast({"type": "status", "workspace": ws, "all": self._status_snap})
 
+    def watch_wake(self):
+        """Detect suspend by wall-vs-monotonic clock divergence (monotonic
+        pauses during suspend). Gateway events from the gap were never
+        delivered — and after a long gap the session re-identifies, which
+        replays nothing — so tell the UI to refetch what it's showing."""
+        mono, wall = time.monotonic(), time.time()
+        while True:
+            time.sleep(5)
+            m, w = time.monotonic(), time.time()
+            if (w - wall) - (m - mono) > 60:
+                print("dsqrd: wake from suspend — resync", flush=True)
+                # kick the gateway immediately: a short gap can still RESUME
+                # (Discord replays the missed events); a long one re-identifies
+                # now instead of waiting out a heartbeat cycle. An expired
+                # resume falls through to re-identify, and wait_online covers
+                # a network that isn't back yet.
+                self.gateway.resumable = True
+                self.gateway.reconnect_requested = True
+                time.sleep(5)   # let the network come back before clients refetch
+                self.broadcast({"type": "resync"})
+            mono, wall = m, w
+
     def run(self):
         threading.Thread(target=self.gateway.connect, daemon=True).start()
         self.wait_ready()
@@ -1088,6 +1662,7 @@ class DQS:
         threading.Thread(target=self.drain_typing, daemon=True).start()
         threading.Thread(target=self.drain_presence, daemon=True).start()
         threading.Thread(target=self.watch_focus, daemon=True).start()
+        threading.Thread(target=self.watch_wake, daemon=True).start()
         threading.Thread(target=self.heartbeat, daemon=True).start()
         threading.Thread(target=self.check_updates, daemon=True).start()
         self.serve()
