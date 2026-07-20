@@ -1521,6 +1521,8 @@ class DQS:
                 elif t == "reactors" and ch and cmd.get("ts"):
                     threading.Thread(target=self.do_reactors,
                                      args=(ch, cmd["ts"], cmd.get("emojis") or []), daemon=True).start()
+                elif t == "checkUpdate":
+                    threading.Thread(target=self._check_update_now, args=(conn,), daemon=True).start()
                 # focus is a no-op (tracked above for notification suppression)
         self.drop(conn)
 
@@ -1559,9 +1561,44 @@ class DQS:
         self.read_conn(conn)
 
     def _check_update_once(self):
-        """Detect a newer build and push an `updateAvailable` event. ETag-
-        conditional, so a 304 (nothing moved) is free against GitHub's 60/h
-        unauthenticated limit.
+        """Background poll: detect a newer build and push an `updateAvailable`
+        event, staying silent on errors / up-to-date. ETag-conditional, so a 304
+        (nothing moved) is free against GitHub's 60/h unauthenticated limit."""
+        if not GIT_REV:
+            return
+        self._last_update_check = time.time()
+        try:
+            self._poll_update()
+        except urllib.error.HTTPError as e:
+            if e.code != 304:   # 304 = unchanged (ETag hit); anything else: retry next cycle
+                pass
+        except Exception:
+            pass
+
+    def _check_update_now(self, conn):
+        """Manual ⌃⇧r check: force a fresh poll (drop the ETag so GitHub can't
+        304 us) and toast the verdict to the asking client — a manual check must
+        never be silently ambiguous, which is the whole reason to press it."""
+        if not GIT_REV:
+            self.write(conn, {"type": "toast", "text": "Update checks are off on a source run"})
+            return
+        self._last_update_check = time.time()
+        self._update_etag = None   # force a 200, not a conditional 304
+        try:
+            latest = self._poll_update()
+        except Exception:
+            self.write(conn, {"type": "toast", "text": "Update check failed — try again"})
+            return
+        if latest:
+            self.write(conn, {"type": "toast",
+                              "text": f"Update available: {GIT_REV[:7]} → {latest[:7]} · U to apply"})
+        else:
+            self.write(conn, {"type": "toast", "text": f"Up to date · {GIT_REV[:7]}"})
+
+    def _poll_update(self):
+        """Core check shared by the background poll and the manual one. Returns
+        the target sha if a newer build exists (and emits the `updateAvailable`
+        badge), else None; raises on network errors / a 304.
 
         A fork signals on two legs: (1) our binary is behind the repo we build
         from, or (2) upstream (daphen) has commits we haven't merged yet — both
@@ -1569,21 +1606,13 @@ class DQS:
         base_commit is our fork's main tip (build leg), ahead_by is how far
         upstream leads it (merge leg). Env is set in flake.nix; a stock daphen
         build has no upstream and falls back to a plain main-SHA poll."""
-        if not GIT_REV:
-            return
-        self._last_update_check = time.time()
         repo = os.environ.get("DSQRD_UPDATE_REPO", "daphen/dsqrd")
         upstream = os.environ.get("DSQRD_UPSTREAM_REPO", "")
-        try:
-            if upstream and upstream != repo:
-                self._check_fork(repo, upstream)
-            else:
-                self._check_plain(repo)
-        except urllib.error.HTTPError as e:
-            if e.code != 304:   # 304 = unchanged (ETag hit); anything else: retry next cycle
-                pass
-        except Exception:
-            pass
+        latest = (self._check_fork(repo, upstream)
+                  if upstream and upstream != repo else self._check_plain(repo))
+        if latest:
+            self._emit_update(latest)
+        return latest
 
     def _gh(self, url, accept="application/vnd.github+json"):
         """GET a GitHub API URL, ETag-conditional via self._update_etag. Returns
@@ -1598,23 +1627,25 @@ class DQS:
         return body.decode().strip() if accept.endswith(".sha") else json.loads(body.decode())
 
     def _check_plain(self, repo):
-        """Stock build: newer iff the repo's main SHA differs from our build."""
+        """Stock build: the target is the repo's main SHA if it differs from our
+        build, else None."""
         latest = self._gh(f"https://api.github.com/repos/{repo}/commits/main",
                            "application/vnd.github.sha")
-        if latest and latest != GIT_REV:
-            self._emit_update(latest)
+        return latest if latest and latest != GIT_REV else None
 
     def _check_fork(self, repo, upstream):
         """Fork build: one compare (our main .. upstream main) covers both legs —
-        base_commit is our fork main tip; ahead_by/commits is upstream's lead."""
+        base_commit is our fork main tip; ahead_by/commits is upstream's lead.
+        Returns the sha to build toward, or None when current on both legs."""
         head = upstream.split("/")[0] + ":main"   # cross-repo head, e.g. daphen:main
         cmp = self._gh(f"https://api.github.com/repos/{repo}/compare/main...{head}")
         fork_tip = (cmp.get("base_commit") or {}).get("sha", "")
         if fork_tip and fork_tip != GIT_REV:
-            self._emit_update(fork_tip)          # build the fork first
-        elif cmp.get("ahead_by", 0) > 0:         # else: daphen has unmerged commits
+            return fork_tip                        # build the fork first
+        if cmp.get("ahead_by", 0) > 0:             # else: daphen has unmerged commits
             commits = cmp.get("commits") or []
-            self._emit_update(commits[-1]["sha"] if commits else upstream)
+            return commits[-1]["sha"] if commits else None
+        return None
 
     def _emit_update(self, latest):
         self.update_event = {"type": "updateAvailable",
