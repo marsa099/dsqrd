@@ -22,11 +22,17 @@ Item {
     readonly property string stamp: Qt.formatDateTime(new Date(), "HH:mm")
 
     // Copilot's summary prompt — kept in sync with dsqrd-cli's `summarize()`.
+    // The transcript is wrapped in CHAT LOG markers in show(); the guardrails
+    // ("however short", "never ask me to paste") stop haiku from punting on a
+    // one-line log with "I don't see a chat log, paste it".
     readonly property string _instr:
-        "Below is a chat log from a Discord channel — everything posted since my "
-      + "last message there. Give me a short catch-up summary: main topics, who "
-      + "said what that matters, any questions directed at me or things I should "
-      + "act on. Answer in the same language the chat is written in.\n\n"
+        "Catch me up on a Discord channel. Everything between the markers below is "
+      + "the chat log — everything posted since my last message there. Give me a "
+      + "short catch-up summary: main topics, who said what that matters, and "
+      + "anything directed at me or that I should act on. Answer in the same "
+      + "language as the chat. The log may be very short — even a single line — "
+      + "just summarize whatever is there; never ask me to paste anything, the log "
+      + "is already below.\n\n"
 
     function show() {
         open = true
@@ -43,7 +49,7 @@ Item {
         // shell untouched, then decode straight into `claude`. Qt.btoa already
         // UTF-8-encodes the string, so pass it raw — wrapping it in
         // unescape(encodeURIComponent()) would double-encode and mojibake it.
-        proc.b64 = Qt.btoa(_instr + c.text)
+        proc.b64 = Qt.btoa(_instr + "===== CHAT LOG =====\n" + c.text + "\n===== END OF CHAT LOG =====")
         proc.running = true
     }
     function close() {
