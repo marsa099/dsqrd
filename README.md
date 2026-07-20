@@ -95,8 +95,34 @@ These are credentials — keep the files private.
   ```
   slqs holds Slack "active" with a websocket `tickle` (the deprecated `users.setActive` is a no-op); dsqrd toggles the gateway `afk` flag. On idle they report away so mobile push resumes.
 
+## CLI (`dsqrd-cli`)
+
+A stdlib-only Python script that talks to the running daemon's socket (same JSON-lines protocol as the UI, but only the side-effect-free `history` command — it never touches the daemon's active-channel/notification state):
+
+```sh
+dsqrd-cli channels [query]              # list channels
+dsqrd-cli messages <name> [-n N]        # print the last N messages (default 50)
+dsqrd-cli messages <name> --since-mine  # everything after my last message
+dsqrd-cli summary <name>                # AI catch-up summary of --since-mine, via `claude -p` (default model: haiku, override with --model)
+```
+
+Channel names match case-insensitively (exact, then substring). `--since-mine` pages back up to 500 messages looking for a message authored by you.
+
+## Copilot catch-up (dsqrd)
+
+A **fork addition** — not in upstream `daphen/dsqrd`. A small button sits in the composer just left of send:
+
+<!-- screenshot: the Copilot button in the composer (idle) -->
+
+Tap it and everything posted in the open channel since your last message is summarized into a single takeover "message" from Microsoft Copilot — main topics, who said what that matters, and anything directed at you to act on, answered in the channel's own language. `q` or `esc` dismisses it; if you're already caught up it just says so.
+
+<!-- screenshots: loading state · the summary takeover -->
+
+Under the hood it's the same engine as `dsqrd-cli summary`: it takes the since-your-last-message transcript, sends it to `claude -p --model haiku` with a short catch-up prompt, and renders the reply. Branded Copilot, powered by Claude — so it needs the `claude` CLI on your `PATH`.
+
 ## Notes
 
+- This repo is a fork of [`daphen/dsqrd`](https://github.com/daphen/dsqrd) with local additions (see **Copilot catch-up**); upstream is merged in periodically.
 - Internal APIs are undocumented and change without notice; some breakage is expected.
 - Hard-coded paths assume `~/personal/{slqs,dsqrd,slk-gui-proto}` and `~/.config/niri/scripts`.
 - Desktop notifications need a running dbus notification server; the daemon's dbus connection self-heals (reconnects) on failure.
