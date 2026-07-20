@@ -1505,25 +1505,22 @@ class Discord():
 
 
     def trending_gifs(self):
-        """Trending gifs — the gif picker's empty-query state."""
+        """Trending category tiles — the gif picker's empty-query state.
+
+        The provider's /trending returns a near-empty `gifs` list; the real
+        content is `categories` (hello, hug, …), each a drill-in that searches
+        its name. `src` is a preview gif for the tile."""
         url = "/api/v9/gifs/trending?media_format=webm&provider=tenor&locale=en-US"
         data, status = self.request("GET", url, None, self.header)
         if not status:
             return []
         if status == 200:
             data = json.loads(data)
-            gifs = []
-            for gif in data.get("gifs", []):
-                gifs.append({
-                    "id": gif.get("id", ""),
-                    "title": gif.get("title", ""),
-                    "url": gif["url"],
-                    "webm": gif["src"],
-                    "gif": gif["gif_src"],
-                    "width": gif.get("width", 0),
-                    "height": gif.get("height", 0),
-                })
-            return gifs
+            cats = []
+            for c in data.get("categories", []):
+                if c.get("name"):
+                    cats.append({"name": c["name"], "src": c.get("src", "")})
+            return cats
         log_api_error(data, status, "trending_gifs")
         return []
 

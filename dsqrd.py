@@ -987,23 +987,32 @@ class DQS:
                 os.remove(f)
         except OSError:
             pass
-        items = (self.discord.search_gifs(q) if q else self.discord.trending_gifs())[:24]
-        out = [{"id": g["id"] or g["url"], "title": g["title"], "url": g["url"],
-                "w": g["width"], "h": g["height"]} for g in items]
+        if q:
+            items = self.discord.search_gifs(q)[:24]
+            # gif result: selecting it sends the page url
+            out = [{"id": g["id"] or g["url"], "title": g["title"], "url": g["url"],
+                    "w": g["width"], "h": g["height"], "media": g["webm"]} for g in items]
+        else:
+            # empty query = trending category tiles; selecting one searches its name
+            items = self.discord.trending_gifs()[:24]
+            out = [{"id": "cat:" + c["name"], "title": c["name"], "url": "",
+                    "category": True, "w": 0, "h": 0, "media": c["src"]} for c in items]
         self.write(conn, {"type": "gifs", "gen": gen, "items": out})
         with ThreadPoolExecutor(max_workers=3) as ex:
-            for g in items:
-                ex.submit(self._gif_preview, conn, gen, d, g)
+            for g in out:
+                ex.submit(self._gif_preview, conn, gen, d, g["id"], g["media"])
 
-    def _gif_preview(self, conn, gen, cachedir, g):
-        if self.gif_gen != gen or not g.get("webm"):
+    def _gif_preview(self, conn, gen, cachedir, item_id, media_url):
+        # ffmpeg reads gif (category tiles) and webm (search results) alike and
+        # normalizes both to a small looping gif Qt can animate.
+        if self.gif_gen != gen or not media_url:
             return
-        key = hashlib.md5(g["webm"].encode()).hexdigest()[:16]
+        key = hashlib.md5(media_url.encode()).hexdigest()[:16]
         dest = os.path.join(cachedir, key + ".gif")
         if not os.path.exists(dest):
-            src = os.path.join(cachedir, key + ".webm")
+            src = os.path.join(cachedir, key + ".src")
             try:
-                req = urllib.request.Request(g["webm"], headers={"User-Agent": self.user_agent})
+                req = urllib.request.Request(media_url, headers={"User-Agent": self.user_agent})
                 with urllib.request.urlopen(req, timeout=15) as r, open(src, "wb") as f:
                     f.write(r.read())
                 p = subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", src,
@@ -1021,7 +1030,7 @@ class DQS:
                     pass
         if self.gif_gen == gen:
             self.write(conn, {"type": "gifPreview", "gen": gen,
-                              "id": g["id"] or g["url"], "path": "file://" + dest})
+                              "id": item_id, "path": "file://" + dest})
 
     def play_audio(self, conn, msg_id, url, ext):
         """Play a voice note / audio attachment in-line (no window): download to
