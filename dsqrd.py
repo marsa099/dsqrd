@@ -1559,33 +1559,67 @@ class DQS:
         self.read_conn(conn)
 
     def _check_update_once(self):
-        """One update check against the repo's main SHA. ETag-conditional, so a
-        304 (unchanged) is free against GitHub's 60/h unauthenticated limit."""
+        """Detect a newer build and push an `updateAvailable` event. ETag-
+        conditional, so a 304 (nothing moved) is free against GitHub's 60/h
+        unauthenticated limit.
+
+        A fork signals on two legs: (1) our binary is behind the repo we build
+        from, or (2) upstream (daphen) has commits we haven't merged yet — both
+        are things `U` (update-dsqrd) resolves. One `compare` call answers both:
+        base_commit is our fork's main tip (build leg), ahead_by is how far
+        upstream leads it (merge leg). Env is set in flake.nix; a stock daphen
+        build has no upstream and falls back to a plain main-SHA poll."""
         if not GIT_REV:
             return
         self._last_update_check = time.time()
-        # Poll the repo this build actually came from — a fork bakes its own rev
-        # into GIT_REV, so checking upstream (daphen) would forever mismatch and
-        # report a phantom update. DSQRD_UPDATE_REPO is set alongside DSQRD_REV
-        # in flake.nix; it defaults to upstream for a stock daphen build.
         repo = os.environ.get("DSQRD_UPDATE_REPO", "daphen/dsqrd")
-        api = f"https://api.github.com/repos/{repo}/commits/main"
+        upstream = os.environ.get("DSQRD_UPSTREAM_REPO", "")
         try:
-            headers = {"User-Agent": "dsqrd", "Accept": "application/vnd.github.sha"}
-            if self._update_etag:
-                headers["If-None-Match"] = self._update_etag
-            with urllib.request.urlopen(urllib.request.Request(api, headers=headers), timeout=15) as r:
-                self._update_etag = r.headers.get("ETag") or self._update_etag
-                latest = r.read().decode().strip()
-            if latest and latest != GIT_REV:
-                self.update_event = {"type": "updateAvailable",
-                                     "current": GIT_REV[:7], "latest": latest[:7]}
-                self.broadcast(self.update_event)
+            if upstream and upstream != repo:
+                self._check_fork(repo, upstream)
+            else:
+                self._check_plain(repo)
         except urllib.error.HTTPError as e:
             if e.code != 304:   # 304 = unchanged (ETag hit); anything else: retry next cycle
                 pass
         except Exception:
             pass
+
+    def _gh(self, url, accept="application/vnd.github+json"):
+        """GET a GitHub API URL, ETag-conditional via self._update_etag. Returns
+        the sha string (sha media type) or parsed JSON; raises HTTPError(304)
+        when nothing changed since the last check."""
+        headers = {"User-Agent": "dsqrd", "Accept": accept}
+        if self._update_etag:
+            headers["If-None-Match"] = self._update_etag
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=15) as r:
+            self._update_etag = r.headers.get("ETag") or self._update_etag
+            body = r.read()
+        return body.decode().strip() if accept.endswith(".sha") else json.loads(body.decode())
+
+    def _check_plain(self, repo):
+        """Stock build: newer iff the repo's main SHA differs from our build."""
+        latest = self._gh(f"https://api.github.com/repos/{repo}/commits/main",
+                           "application/vnd.github.sha")
+        if latest and latest != GIT_REV:
+            self._emit_update(latest)
+
+    def _check_fork(self, repo, upstream):
+        """Fork build: one compare (our main .. upstream main) covers both legs —
+        base_commit is our fork main tip; ahead_by/commits is upstream's lead."""
+        head = upstream.split("/")[0] + ":main"   # cross-repo head, e.g. daphen:main
+        cmp = self._gh(f"https://api.github.com/repos/{repo}/compare/main...{head}")
+        fork_tip = (cmp.get("base_commit") or {}).get("sha", "")
+        if fork_tip and fork_tip != GIT_REV:
+            self._emit_update(fork_tip)          # build the fork first
+        elif cmp.get("ahead_by", 0) > 0:         # else: daphen has unmerged commits
+            commits = cmp.get("commits") or []
+            self._emit_update(commits[-1]["sha"] if commits else upstream)
+
+    def _emit_update(self, latest):
+        self.update_event = {"type": "updateAvailable",
+                             "current": GIT_REV[:7], "latest": latest[:7]}
+        self.broadcast(self.update_event)
 
     def check_updates(self):
         """Tell the client when a newer build exists. Detect-only — applying is the
