@@ -234,6 +234,7 @@ FloatingWindow {
             "b":        { act: () => { if (win.isDiscord) win.toggleSidebar(); else browse.show() },
                           help: () => win.isDiscord ? "Toggle sidebar" : "Browse channels", cat: "chats" },
             "s":        { act: () => sidebar.toggleStarCurrent(), help: "Star / unstar channel", cat: "chats" },
+            "c":        { act: () => win.showCopilot(), help: "Copilot catch-up", cat: "chats" },
             "u":        { act: () => win.openUpload(), help: "Attach a file", cat: "chats" },
             // slqs only (Discord has no equivalent): d = DM anyone, I = invite to channel.
             "d":        { act: () => { if (!Backend.railHidden) peoplePicker.showDM() }, help: () => Backend.railHidden ? "" : "Message someone", cat: "chats" },

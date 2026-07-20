@@ -114,7 +114,7 @@ A **fork addition** — not in upstream `daphen/dsqrd`. A small button sits in t
 
 <!-- screenshot: the Copilot button in the composer (idle) -->
 
-Tap it and everything posted in the open channel since your last message is summarized into a single takeover "message" from Microsoft Copilot — main topics, who said what that matters, and anything directed at you to act on, answered in the channel's own language. `q` or `esc` dismisses it; if you're already caught up it just says so.
+Tap it — or press `c` in a channel — and everything posted in the open channel since your last message is summarized into a single takeover "message" from Microsoft Copilot — main topics, who said what that matters, and anything directed at you to act on, answered in the channel's own language. `q` or `esc` dismisses it; if you're already caught up it just says so.
 
 <!-- screenshots: loading state · the summary takeover -->
 
