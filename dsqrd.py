@@ -726,15 +726,14 @@ class DQS:
         wss = [DM_WS] + [g["guild_id"] for g in self.guilds]
         return {ws: lst for ws in wss}
 
-    def send_bootstrap(self, conn):
-        if self.update_event:   # replay update-available state to a (re)connecting client
-            self.write(conn, self.update_event)
+    def _workspaces_msg(self):
         # Direct Messages is a synthetic workspace, listed first so it is the default.
         wss = [{"id": DM_WS, "name": "Direct Messages", "icon": ""}]
         wss += [{"id": g["guild_id"], "name": g.get("name", "?"),
                  "icon": icon_url(g["guild_id"], g.get("icon"))} for g in self.guilds]
-        self.write(conn, {"type": "workspaces", "workspaces": wss, "rail": True, "threads": False})
-        self.write(conn, {"type": "users", "users": self.users_payload()})
+        return {"type": "workspaces", "workspaces": wss, "rail": True, "threads": False}
+
+    def _channels_msg(self):
         entries = []
         for dm in self.dms:
             rec = (dm.get("recipients") or [{}])[0]
@@ -754,7 +753,14 @@ class DQS:
                     "topic": ch.get("topic") or "", "unread": 0, "mention": False, "avatar": "", "workspace": gid,
                     "user": "",
                 })
-        self.write(conn, {"type": "channels", "channels": entries, "subThreads": []})
+        return {"type": "channels", "channels": entries, "subThreads": []}
+
+    def send_bootstrap(self, conn):
+        if self.update_event:   # replay update-available state to a (re)connecting client
+            self.write(conn, self.update_event)
+        self.write(conn, self._workspaces_msg())
+        self.write(conn, {"type": "users", "users": self.users_payload()})
+        self.write(conn, self._channels_msg())
         for ws in [DM_WS] + [g["guild_id"] for g in self.guilds]:
             if self._presence_snap:
                 self.write(conn, {"type": "presence", "workspace": ws, "all": self._presence_snap})
@@ -1304,6 +1310,31 @@ class DQS:
         self.broadcast({"type": "attachReady", "channel": channel_id, "name": name, "ok": True})
 
     # ---- loops ----
+    def refresh_guilds(self):
+        """Pick up servers joined (or left) after startup. The gateway sends a
+        full guild list only in READY; a later join arrives as GUILD_CREATE,
+        which we surface via get_guilds() — it returns the new list only when it
+        changes, else None. On a change, rebuild guild/channel/emoji state and
+        re-broadcast workspaces + channels so the server appears in the rail with
+        no daemon restart."""
+        while True:
+            time.sleep(15)
+            try:
+                g = self.gateway.get_guilds()
+                if not g:
+                    continue
+                self.guilds = g
+                for gg in self.guilds:
+                    for ch in gg.get("channels", []):
+                        self.chan_guild[ch["id"]] = gg["guild_id"]
+                        self.chan_name[ch["id"]] = ch.get("name", "")
+                self._build_emoji()
+                self.broadcast(self._workspaces_msg())
+                self.broadcast(self._channels_msg())
+                print(f"dsqrd: guilds changed -> {len(self.guilds)} guilds", flush=True)
+            except Exception as e:
+                print(f"dsqrd: guild refresh error {e!r}", flush=True)
+
     def drain_gateway(self):
         while True:
             try:
@@ -1665,6 +1696,7 @@ class DQS:
         threading.Thread(target=self.watch_wake, daemon=True).start()
         threading.Thread(target=self.heartbeat, daemon=True).start()
         threading.Thread(target=self.check_updates, daemon=True).start()
+        threading.Thread(target=self.refresh_guilds, daemon=True).start()
         self.serve()
 
 
