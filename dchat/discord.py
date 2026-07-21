@@ -250,6 +250,17 @@ class Discord():
                     return None, None
             entry[1] = True
 
+        # Honor the requested timeout on REUSED pooled connections too — they
+        # keep their creation timeout otherwise, so the 2s default would time
+        # out a slow attachment-message create even though Discord accepted it
+        # (surfaced as a false "rejected" toast).
+        try:
+            connection.timeout = timeout
+            if connection.sock is not None:
+                connection.sock.settimeout(timeout)
+        except Exception:
+            pass
+
         # do request
         try:
             try:
@@ -782,7 +793,12 @@ class Discord():
             message_dict["sticker_ids"] = stickers
         message_data = json.dumps(message_dict)
         url = f"/api/v9/channels/{channel_id}/messages"
-        data, status = self.request("POST", url, message_data, self.header)
+        # Discord scans/processes an attached video before responding to the
+        # create, which can exceed the 2s default — give attachment sends
+        # headroom so a successful post isn't misread as a timeout (false
+        # "rejected" toast).
+        to = 60 if attachments else CONNECTION_TIMEOUT
+        data, status = self.request("POST", url, message_data, self.header, timeout=to)
         if not status:
             return None
         if status == 200:
