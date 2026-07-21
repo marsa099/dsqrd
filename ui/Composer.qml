@@ -207,12 +207,13 @@ Rectangle {
         anchors.right: parent.right; anchors.rightMargin: 46
         anchors.bottom: parent.bottom; anchors.bottomMargin: 8
         width: 32; height: 32; radius: Theme.radiusSm
-        color: copilotHover.hovered ? Theme.selection : Qt.rgba(Theme.fg.r, Theme.fg.g, Theme.fg.b, 0.06)
-        Behavior on color { ColorAnimation { duration: 120 } }
-        Image { anchors.centerIn: parent; width: 17; height: 17
+        color: "transparent"
+        clip: true
+        Image { anchors.fill: parent
                 source: Qt.resolvedUrl("copilot.svg")
-                sourceSize.width: 17; sourceSize.height: 17; smooth: true
-                opacity: copilotHover.hovered ? 1.0 : 0.82
+                sourceSize.width: 32; sourceSize.height: 32; smooth: true
+                fillMode: Image.PreserveAspectCrop
+                opacity: copilotHover.hovered ? 1.0 : 0.9
                 Behavior on opacity { NumberAnimation { duration: 120 } } }
         HoverHandler { id: copilotHover; cursorShape: Qt.PointingHandCursor }
         TapHandler { onTapped: root.copilotRequested() }
