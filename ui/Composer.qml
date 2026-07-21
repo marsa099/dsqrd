@@ -83,12 +83,12 @@ Rectangle {
         anchors.left: parent.left; anchors.leftMargin: 14
         anchors.top: parent.top; anchors.topMargin: 8
         spacing: 6
-        Text { renderType: Text.NativeRendering; anchors.verticalCenter: parent.verticalCenter
+        Text { anchors.verticalCenter: parent.verticalCenter
                text: root.editingTs !== "" ? "✎  Editing message"
                    : ("↰  Replying to " + root.replyAuthor + (Backend.hasThreads ? "  ·  in thread + channel" : ""))
                color: root.inkFg
                font.family: Theme.fontFamily; font.hintingPreference: Font.PreferNoHinting; font.pixelSize: 13 }
-        Text { renderType: Text.NativeRendering; anchors.verticalCenter: parent.verticalCenter
+        Text { anchors.verticalCenter: parent.verticalCenter
                text: "  ✕"; color: root.inkMuted
                font.family: Theme.fontFamily; font.pixelSize: 13
                TapHandler { onTapped: { if (root.editingTs !== "") root.cancelEdit(); else { root.replyTs = ""; root.replyAuthor = "" } } } }
@@ -108,14 +108,14 @@ Rectangle {
         spacing: 6
         Icon { name: "paperclip"; width: 13; height: 13; color: Theme.fg_secondary
                anchors.verticalCenter: parent.verticalCenter }
-        Text { renderType: Text.NativeRendering; anchors.verticalCenter: parent.verticalCenter
+        Text { anchors.verticalCenter: parent.verticalCenter
                text: Backend.attachState === "uploading" ? ("uploading " + (Backend.attachName || "file") + "…") : (Backend.attachName || "file")
                color: Backend.attachState === "uploading" ? root.inkMuted : root.inkFg
                font.family: Theme.fontFamily; font.hintingPreference: Font.PreferNoHinting; font.pixelSize: 13 }
-        Text { renderType: Text.NativeRendering; anchors.verticalCenter: parent.verticalCenter
+        Text { anchors.verticalCenter: parent.verticalCenter
                text: Backend.attachState === "ready" ? "✓" : ""; color: Theme.green
                font.family: Theme.fontFamily; font.pixelSize: 13 }
-        Text { renderType: Text.NativeRendering; anchors.verticalCenter: parent.verticalCenter
+        Text { anchors.verticalCenter: parent.verticalCenter
                text: "  ✕"; color: root.inkMuted
                font.family: Theme.fontFamily; font.pixelSize: 13
                TapHandler { onTapped: Backend.dropAttach() } }
@@ -131,7 +131,7 @@ Rectangle {
             if (contentY >= r.y) contentY = r.y
             else if (contentY + height <= r.y + r.height) contentY = r.y + r.height - height
         }
-        TextArea { renderType: TextArea.NativeRendering;
+        TextArea { 
             id: input
             width: flick.width
             onCursorRectangleChanged: flick.ensureVisible(cursorRectangle)

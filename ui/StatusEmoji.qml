@@ -21,15 +21,17 @@ Item {
         anchors.centerIn: parent
         text: se.emoji
         font.pixelSize: se.px - 2
-        renderType: Text.NativeRendering
     }
-    Image {
+    // AnimatedImage (not Image) so animated custom status emoji actually play;
+    // it renders single-frame png/webp fine too. Paused while hidden to save work.
+    AnimatedImage {
         visible: se.src !== ""
         anchors.fill: parent
         source: se.src
         sourceSize.width: se.px * 2
         sourceSize.height: se.px * 2
         fillMode: Image.PreserveAspectFit
-        asynchronous: true
+        smooth: true; mipmap: true; cache: true
+        playing: se.visible
     }
 }

@@ -344,6 +344,10 @@ class Discord():
                 "joined_at": None,
                 "tag": tag,
                 "bot": data["user"].get("bot"),
+                "banner": data["user"].get("banner"),
+                "accent_color": data["user"].get("accent_color"),
+                "connected_accounts": data.get("connected_accounts") or [],
+                "premium_since": data.get("premium_since"),
                 "extra": extra_data,
                 "roles": None,
             }

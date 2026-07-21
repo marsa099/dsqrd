@@ -136,6 +136,26 @@ def avatar_url(user_id, avatar_hash):
     return f"{CDN}/avatars/{user_id}/{avatar_hash}.png?size=64"
 
 
+def banner_url(user_id, banner_hash):
+    if not user_id or not banner_hash:
+        return ""
+    ext = "gif" if str(banner_hash).startswith("a_") else "png"
+    return f"{CDN}/banners/{user_id}/{banner_hash}.{ext}?size=480"
+
+
+DISCORD_EPOCH = 1420070400000
+
+
+def snowflake_date(user_id):
+    """Account-creation date encoded in a Discord snowflake id."""
+    try:
+        ms = (int(user_id) >> 22) + DISCORD_EPOCH
+    except (TypeError, ValueError):
+        return ""
+    t = time.gmtime(ms / 1000)
+    return time.strftime("%b %-d, %Y", t)
+
+
 AVATAR_CACHE = os.path.expanduser("~/.cache/dsqrd/avatars")
 
 
@@ -726,15 +746,14 @@ class DQS:
         wss = [DM_WS] + [g["guild_id"] for g in self.guilds]
         return {ws: lst for ws in wss}
 
-    def send_bootstrap(self, conn):
-        if self.update_event:   # replay update-available state to a (re)connecting client
-            self.write(conn, self.update_event)
+    def _workspaces_msg(self):
         # Direct Messages is a synthetic workspace, listed first so it is the default.
         wss = [{"id": DM_WS, "name": "Direct Messages", "icon": ""}]
         wss += [{"id": g["guild_id"], "name": g.get("name", "?"),
                  "icon": icon_url(g["guild_id"], g.get("icon"))} for g in self.guilds]
-        self.write(conn, {"type": "workspaces", "workspaces": wss, "rail": True, "threads": False})
-        self.write(conn, {"type": "users", "users": self.users_payload()})
+        return {"type": "workspaces", "workspaces": wss, "rail": True, "threads": False}
+
+    def _channels_msg(self):
         entries = []
         for dm in self.dms:
             rec = (dm.get("recipients") or [{}])[0]
@@ -754,7 +773,14 @@ class DQS:
                     "topic": ch.get("topic") or "", "unread": 0, "mention": False, "avatar": "", "workspace": gid,
                     "user": "",
                 })
-        self.write(conn, {"type": "channels", "channels": entries, "subThreads": []})
+        return {"type": "channels", "channels": entries, "subThreads": []}
+
+    def send_bootstrap(self, conn):
+        if self.update_event:   # replay update-available state to a (re)connecting client
+            self.write(conn, self.update_event)
+        self.write(conn, self._workspaces_msg())
+        self.write(conn, {"type": "users", "users": self.users_payload()})
+        self.write(conn, self._channels_msg())
         for ws in [DM_WS] + [g["guild_id"] for g in self.guilds]:
             if self._presence_snap:
                 self.write(conn, {"type": "presence", "workspace": ws, "all": self._presence_snap})
@@ -800,6 +826,75 @@ class DQS:
             self.queue_gifv(channel_id, mm)
         out.reverse()
         self.write(conn, {"type": "history", "channel": channel_id, "msgs": out})
+
+    def do_profile(self, conn, user_id, ws):
+        """Fetch a Discord user's profile card (P in the client). Maps to the
+        same `profile` event slqs emits — the shared ProfilePanel shows whichever
+        fields are set, so Discord's bio/pronouns fill in and slqs-only fields
+        (title/email/phone/tz) stay empty and hidden."""
+        try:
+            u = self.discord.get_user(user_id, extra=True)
+        except Exception as e:
+            print(f"dsqrd: profile fetch error {e!r}", flush=True)
+            u = None
+        if not u:
+            self.write(conn, {"type": "toast", "text": "Couldn't load profile"})
+            return
+        extra = u.get("extra") or {}
+        name = u.get("global_name") or u.get("username") or "someone"
+        uid = str(u.get("id") or user_id)
+        pres, activity = self._presence_activity(uid)
+        # dedupe connected accounts by service, keep the visible name
+        seen, conns = set(), []
+        for c in (u.get("connected_accounts") or []):
+            svc = (c.get("type") or "").strip()
+            if not svc or svc in seen:
+                continue
+            seen.add(svc)
+            label = svc[:1].upper() + svc[1:]
+            nm = c.get("name") or ""
+            conns.append(f"{label}: {nm}" if nm and nm.lower() != svc.lower() else label)
+        ban = u.get("banner")
+        prof = {
+            "name": name, "realName": "", "handle": u.get("username") or "",
+            "title": "", "email": "", "phone": "", "tz": "", "tzOffset": None,
+            "statusText": "",
+            "statusEmoji": self._status_snap.get(uid, ""),
+            "avatar": avatar_url(u.get("id"), extra.get("avatar")),
+            "isBot": bool(u.get("bot")),
+            "bio": u.get("bio") or "", "pronouns": u.get("pronouns") or "",
+            "banner": banner_url(uid, ban) if ban else "",
+            "created": snowflake_date(uid),
+            "connections": "  ·  ".join(conns),
+            "presence": pres, "activity": activity,
+        }
+        self.write(conn, {"type": "profile", "workspace": ws, "user": uid, "profile": prof})
+
+    def _presence_activity(self, uid):
+        """(status, activity-line) for a user from the gateway's DM presence
+        list. status is online/idle/dnd/offline; activity is a human line like
+        'Listening to Spotify — Song by Artist' or 'Playing Foo', or ''."""
+        try:
+            acts = self.gateway.get_dm_activities() or []
+        except Exception:
+            return "", ""
+        for a in acts:
+            if str(a.get("id") or "") != uid:
+                continue
+            status = a.get("status") or ""
+            line = ""
+            for act in (a.get("activities") or []):
+                if act.get("type") == 2:   # listening (Spotify)
+                    song, artist = act.get("details") or "", act.get("state") or ""
+                    line = f"Listening to {act.get('name') or 'music'}"
+                    if song:
+                        line += f" — {song}" + (f" by {artist}" if artist else "")
+                elif act.get("type") == 0:  # playing
+                    line = f"Playing {act.get('name') or ''}".strip()
+                if line:
+                    break
+            return status, line
+        return "", ""
 
     def do_reactors(self, channel_id, ts, emojis):
         """Fetch who reacted (Discord's gateway omits the user list). One API call
@@ -1304,6 +1399,31 @@ class DQS:
         self.broadcast({"type": "attachReady", "channel": channel_id, "name": name, "ok": True})
 
     # ---- loops ----
+    def refresh_guilds(self):
+        """Pick up servers joined (or left) after startup. The gateway sends a
+        full guild list only in READY; a later join arrives as GUILD_CREATE,
+        which we surface via get_guilds() — it returns the new list only when it
+        changes, else None. On a change, rebuild guild/channel/emoji state and
+        re-broadcast workspaces + channels so the server appears in the rail with
+        no daemon restart."""
+        while True:
+            time.sleep(15)
+            try:
+                g = self.gateway.get_guilds()
+                if not g:
+                    continue
+                self.guilds = g
+                for gg in self.guilds:
+                    for ch in gg.get("channels", []):
+                        self.chan_guild[ch["id"]] = gg["guild_id"]
+                        self.chan_name[ch["id"]] = ch.get("name", "")
+                self._build_emoji()
+                self.broadcast(self._workspaces_msg())
+                self.broadcast(self._channels_msg())
+                print(f"dsqrd: guilds changed -> {len(self.guilds)} guilds", flush=True)
+            except Exception as e:
+                print(f"dsqrd: guild refresh error {e!r}", flush=True)
+
     def drain_gateway(self):
         while True:
             try:
@@ -1523,6 +1643,9 @@ class DQS:
                                      args=(ch, cmd["ts"], cmd.get("emojis") or []), daemon=True).start()
                 elif t == "checkUpdate":
                     threading.Thread(target=self._check_update_now, args=(conn,), daemon=True).start()
+                elif t == "profile" and cmd.get("user"):
+                    threading.Thread(target=self.do_profile,
+                                     args=(conn, str(cmd["user"]), cmd.get("workspace", "")), daemon=True).start()
                 # focus is a no-op (tracked above for notification suppression)
         self.drop(conn)
 
@@ -1735,6 +1858,7 @@ class DQS:
         threading.Thread(target=self.watch_wake, daemon=True).start()
         threading.Thread(target=self.heartbeat, daemon=True).start()
         threading.Thread(target=self.check_updates, daemon=True).start()
+        threading.Thread(target=self.refresh_guilds, daemon=True).start()
         self.serve()
 
 

@@ -40,23 +40,25 @@ Rectangle {
     component Detail: Column {
         property string label: ""
         property string value: ""
+        property bool wrap: false
         visible: value !== ""
         width: parent.width
         spacing: 3
         topPadding: 14
         Text {
-            renderType: Text.QtRendering; renderTypeQuality: Text.VeryHighRenderTypeQuality
+            renderTypeQuality: Text.VeryHighRenderTypeQuality
             text: parent.label
             color: Theme.fg_muted
             font.family: Theme.fontFamily; font.pixelSize: 11; font.letterSpacing: 1.2
             font.capitalization: Font.AllUppercase
         }
         Text {
-            renderType: Text.QtRendering; renderTypeQuality: Text.VeryHighRenderTypeQuality
+            renderTypeQuality: Text.VeryHighRenderTypeQuality
             width: parent.width
             text: parent.value
             color: Theme.fg
-            elide: Text.ElideRight
+            elide: parent.wrap ? Text.ElideNone : Text.ElideRight
+            wrapMode: parent.wrap ? Text.Wrap : Text.NoWrap
             font.family: Theme.fontFamily; font.pixelSize: 13
         }
     }
@@ -65,6 +67,23 @@ Rectangle {
         anchors.fill: parent
         anchors.margins: Theme.insetCard + 10
         spacing: 0
+
+        ClippingRectangle {
+            id: bannerClip
+            visible: (panel.p.banner || "") !== ""
+            width: parent.width
+            height: visible ? 92 : 0
+            radius: 16
+            color: Theme.surface
+            Image {
+                anchors.fill: parent
+                source: panel.p.banner || ""
+                fillMode: Image.PreserveAspectCrop
+                asynchronous: true
+                sourceSize.width: 900
+            }
+        }
+        Item { width: 1; height: bannerClip.visible ? 14 : 0 }
 
         ClippingRectangle {
             id: avatarClip
@@ -84,17 +103,22 @@ Rectangle {
         Row {
             spacing: 8
             Text {
-                renderType: Text.QtRendering; renderTypeQuality: Text.VeryHighRenderTypeQuality
+                renderTypeQuality: Text.VeryHighRenderTypeQuality
                 text: panel.p.name || ""
                 color: Theme.fg
                 font.family: Theme.fontFamily; font.pixelSize: 19; font.weight: 600
             }
-            // solid dot = active, hollow ring = away (sidebar grammar)
+            // presence dot: green online · yellow idle · red dnd · hollow offline.
+            // Prefer the daemon's fine-grained status (Discord), else the coarse
+            // active/away the sidebar uses (Slack).
             Rectangle {
                 width: 9; height: 9; radius: 4.5
                 anchors.verticalCenter: parent.verticalCenter
-                color: panel.presence === "active" ? Theme.green : "transparent"
-                border.width: panel.presence === "active" ? 0 : 1
+                readonly property string st: panel.p.presence || (panel.presence === "active" ? "online" : "")
+                readonly property bool filled: st === "online" || st === "idle" || st === "dnd"
+                color: st === "online" ? Theme.green : st === "idle" ? Theme.yellow
+                     : st === "dnd" ? Theme.red : "transparent"
+                border.width: filled ? 0 : 1
                 border.color: Theme.fg_muted
             }
             StatusEmoji {
@@ -107,11 +131,12 @@ Rectangle {
         Item { width: 1; height: 4 }
 
         Text {
-            renderType: Text.QtRendering; renderTypeQuality: Text.VeryHighRenderTypeQuality
+            renderTypeQuality: Text.VeryHighRenderTypeQuality
             text: {
                 const bits = []
                 if (panel.p.realName && panel.p.realName !== panel.p.name) bits.push(panel.p.realName)
                 if (panel.p.handle) bits.push("@" + panel.p.handle)
+                if (panel.p.pronouns) bits.push(panel.p.pronouns)
                 if (panel.p.isBot) bits.push("bot")
                 return bits.join("  ·  ")
             }
@@ -121,7 +146,18 @@ Rectangle {
         }
 
         Text {
-            renderType: Text.QtRendering; renderTypeQuality: Text.VeryHighRenderTypeQuality
+            renderTypeQuality: Text.VeryHighRenderTypeQuality
+            visible: (panel.p.activity || "") !== ""
+            width: parent.width
+            topPadding: 8
+            text: panel.p.activity || ""
+            color: Theme.green
+            wrapMode: Text.Wrap
+            font.family: Theme.fontFamily; font.pixelSize: 12
+        }
+
+        Text {
+            renderTypeQuality: Text.VeryHighRenderTypeQuality
             visible: (panel.p.statusText || "") !== ""
             width: parent.width
             topPadding: 10
@@ -134,6 +170,9 @@ Rectangle {
         Item { width: 1; height: 18 }
         Rectangle { width: parent.width; height: 1; color: Theme.hairline }
 
+        Detail { label: "About";       value: panel.p.bio || ""; wrap: true }
+        Detail { label: "Connections"; value: panel.p.connections || ""; wrap: true }
+        Detail { label: "On Discord since"; value: panel.p.created || "" }
         Detail { label: "Title";      value: panel.p.title || "" }
         Detail { label: "Local time"; value: panel.localTime() }
         Detail { label: "Email";      value: panel.p.email || "" }

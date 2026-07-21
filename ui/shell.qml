@@ -263,8 +263,8 @@ FloatingWindow {
             "Y":        { act: () => { if (focusedPanel === "messages") Backend.copyLink(msgs.currentMessage()) }, help: "Copy message link", cat: "msg" },
             "M":        { act: () => { if (!Backend.railHidden && focusedPanel === "messages") { const m = msgs.currentMessage(); if (m && m.uid) Backend.openDM(m.uid) } },
                           help: () => Backend.railHidden ? "" : "DM author", cat: "msg" },
-            "P":        { act: () => { if (!Backend.railHidden && focusedPanel === "messages") { const m = msgs.currentMessage(); if (m && m.uid) Backend.openProfile(m.uid) } },
-                          help: () => Backend.railHidden ? "" : "View profile", cat: "msg" },
+            "P":        { act: () => { if (focusedPanel === "messages") { const m = msgs.currentMessage(); if (m && m.uid) Backend.openProfile(m.uid) } },
+                          help: () => "View profile", cat: "msg" },
             // views & general
             "?":        { act: () => help.show(), help: "This help", cat: "view" },
             "ctrl+shift+r": { act: () => Backend.checkForUpdates(), help: "Check for updates", cat: "view" },
@@ -285,8 +285,8 @@ FloatingWindow {
             "v":      { act: () => Backend.viewImage(thread.currentMessage()), help: "View image", cat: "msg" },
             "M":      { act: () => { if (!Backend.railHidden) { const m = thread.currentMessage(); if (m && m.uid) Backend.openDM(m.uid) } },
                         help: () => Backend.railHidden ? "" : "DM author", cat: "msg" },
-            "P":      { act: () => { if (!Backend.railHidden) { const m = thread.currentMessage(); if (m && m.uid) Backend.openProfile(m.uid) } },
-                        help: () => Backend.railHidden ? "" : "View profile", cat: "msg" },
+            "P":      { act: () => { const m = thread.currentMessage(); if (m && m.uid) Backend.openProfile(m.uid) },
+                        help: () => "View profile", cat: "msg" },
             "o":      { act: () => Backend.openChannelRef(thread.currentMessage()), help: "Open link", cat: "msg" },
             "r":      { act: () => reactTo(thread.currentMessage()), help: "React", cat: "msg" },
             "y":      { act: () => Backend.copyText(thread.currentMessage()), help: "Copy text", cat: "msg" },
@@ -448,13 +448,13 @@ FloatingWindow {
                         Row {
                             anchors.left: parent.left; anchors.leftMargin: 18
                             anchors.verticalCenter: parent.verticalCenter; spacing: 9
-                            Text { renderType: Text.NativeRendering; text: "#"; color: Theme.fg_muted; anchors.verticalCenter: parent.verticalCenter
+                            Text { text: "#"; color: Theme.fg_muted; anchors.verticalCenter: parent.verticalCenter
                                    font.family: Theme.fontFamily; font.hintingPreference: Font.PreferNoHinting; font.pixelSize: 19 }
-                            Text { renderType: Text.NativeRendering; text: Backend.currentChannel; color: Theme.fg; anchors.verticalCenter: parent.verticalCenter
+                            Text { text: Backend.currentChannel; color: Theme.fg; anchors.verticalCenter: parent.verticalCenter
                                    font.family: Theme.fontFamily; font.hintingPreference: Font.PreferNoHinting; font.pixelSize: 17; font.weight: 500 }
                             Rectangle { visible: Backend.currentTopic.length > 0; width: 1; height: 16; color: Theme.hairline
                                         anchors.verticalCenter: parent.verticalCenter }
-                            Text { renderType: Text.NativeRendering; anchors.verticalCenter: parent.verticalCenter
+                            Text { anchors.verticalCenter: parent.verticalCenter
                                    // collapse the (often multi-line) topic to one elided line
                                    text: Backend.currentTopic.replace(/[\r\n]+/g, "  ")
                                    color: Theme.fg_muted; elide: Text.ElideRight
@@ -471,7 +471,7 @@ FloatingWindow {
                             width: joinLbl.implicitWidth + 22; height: 26; radius: 6
                             color: joinMA.containsMouse ? Theme.selection : Theme.surface
                             border.width: 1; border.color: Theme.sky
-                            Text { id: joinLbl; renderType: Text.NativeRendering; anchors.centerIn: parent
+                            Text { id: joinLbl; anchors.centerIn: parent
                                    text: "+ Join channel"; color: Theme.sky
                                    font.family: Theme.fontFamily; font.hintingPreference: Font.PreferNoHinting; font.pixelSize: 13; font.weight: 500 }
                             MouseArea { id: joinMA; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
@@ -520,7 +520,7 @@ FloatingWindow {
                             height: Backend.typing ? 22 : 0
                             clip: true
                             Behavior on height { NumberAnimation { duration: 120 } }
-                            Text { renderType: Text.NativeRendering;
+                            Text { 
                                 x: 20; anchors.top: parent.top; anchors.bottom: parent.bottom
                                 verticalAlignment: Text.AlignVCenter
                                 text: Backend.typingWho + " is typing…"
@@ -574,7 +574,6 @@ FloatingWindow {
                             Text {
                                 anchors.verticalCenter: parent.verticalCenter
                                 text: "Opening media…"; color: Theme.bg
-                                renderType: Text.NativeRendering
                                 font.family: Theme.fontFamily; font.hintingPreference: Font.PreferNoHinting; font.pixelSize: 13
                             }
                         }
@@ -615,7 +614,6 @@ FloatingWindow {
                                 text: Backend.voiceState === "sending" ? "Sending voice note…"
                                     : "Recording  " + Math.floor(voiceBadge.secs / 60) + ":" + ("0" + (voiceBadge.secs % 60)).slice(-2) + "   ⏎ send · esc cancel"
                                 color: Theme.bg
-                                renderType: Text.NativeRendering
                                 font.family: Theme.fontFamily; font.hintingPreference: Font.PreferNoHinting; font.pixelSize: 13
                             }
                         }
@@ -647,10 +645,14 @@ FloatingWindow {
                         width: Math.min(560, parent.width * 0.58)
                         anchors.top: parent.top; anchors.bottom: parent.bottom
                         anchors.topMargin: 8; anchors.bottomMargin: 12
-                        x: Backend.threadOpen ? (parent.width - width - 12) : parent.width
-                        Behavior on x { PanelMotion {} }
+                        anchors.right: parent.right
+                        // slide via a panel-width-relative right margin (not an x
+                        // tied to parent.width) so toggling the sidebar — which
+                        // animates the container width — can't drag a closed panel in.
+                        anchors.rightMargin: Backend.threadOpen ? 12 : -(width + 24)
+                        Behavior on anchors.rightMargin { PanelMotion {} }
                         // never render a thread container on a threadless backend (Discord)
-                        visible: Backend.hasThreads && x < parent.width - 1
+                        visible: Backend.hasThreads && anchors.rightMargin > -width
                         z: 5
                         onExitReply: win.backToNormal()
                         onOpenPalette: palette.show()
@@ -658,17 +660,19 @@ FloatingWindow {
                         onPanelMove: (d) => { if (d < 0) win.closeThreadAction(); else win.backToNormal() }
                     }
 
-                    // Profile card panel (slqs): same slide-in grammar as the
-                    // thread panel, narrower. Only one right panel at a time —
-                    // Backend closes whichever other panel is open.
+                    // Profile card panel: same slide-in grammar as the thread
+                    // panel, narrower. Only one right panel at a time — Backend
+                    // closes whichever other panel is open. Works for slqs and
+                    // dsqrd; each daemon serves the `profile` event.
                     ProfilePanel {
                         id: profilePanel
                         width: Math.min(420, parent.width * 0.44)
                         anchors.top: parent.top; anchors.bottom: parent.bottom
                         anchors.topMargin: 8; anchors.bottomMargin: 12
-                        x: Backend.profileOpen ? (parent.width - width - 12) : parent.width
-                        Behavior on x { PanelMotion {} }
-                        visible: !Backend.railHidden && x < parent.width - 1
+                        anchors.right: parent.right
+                        anchors.rightMargin: Backend.profileOpen ? 12 : -(width + 24)
+                        Behavior on anchors.rightMargin { PanelMotion {} }
+                        visible: anchors.rightMargin > -width
                         z: 6
                     }
                 }
@@ -689,7 +693,7 @@ FloatingWindow {
                         width: modeLabel.implicitWidth + 16; height: 22; radius: 7
                         anchors.verticalCenter: parent.verticalCenter
                         color: win.insertMode ? Theme.cursor : Theme.green
-                        Text { renderType: Text.NativeRendering;
+                        Text { 
                             id: modeLabel; anchors.centerIn: parent
                             text: win.insertMode ? "INSERT" : "NORMAL"
                             // Contrast against the chip's own bg: dark text on a light
@@ -700,7 +704,7 @@ FloatingWindow {
                             font.pixelSize: 11; font.weight: 500; font.letterSpacing: 0.5
                         }
                     }
-                    Text { renderType: Text.NativeRendering;
+                    Text { 
                         anchors.verticalCenter: parent.verticalCenter
                         text: "panel: " + win.focusedPanel + "   #" + Backend.currentChannel
                               + (win.pendingCount > 0 ? "      " + win.pendingCount : "")
@@ -748,7 +752,7 @@ FloatingWindow {
                     StatusCap { text: "esc" }
                     CapLabel { text: "normal" }
                 }
-                Text { renderType: Text.NativeRendering;
+                Text { 
                     visible: Backend.updateAvailable
                     anchors.right: parent.right; anchors.rightMargin: 14
                     anchors.verticalCenter: parent.verticalCenter
@@ -859,7 +863,7 @@ FloatingWindow {
                 color: Theme.surface; border.width: 1; border.color: Theme.hairline
                 Behavior on opacity { NumberAnimation { duration: 140 } }
                 Text {
-                    id: toastLbl; renderType: Text.NativeRendering; anchors.centerIn: parent
+                    id: toastLbl; anchors.centerIn: parent
                     text: toast.message; color: Theme.fg
                     font.family: Theme.fontFamily; font.hintingPreference: Font.PreferNoHinting; font.pixelSize: 13
                 }
