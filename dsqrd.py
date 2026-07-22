@@ -619,6 +619,7 @@ class DQS:
         self.play_lock = threading.Lock()
         self.gif_gen = 0          # newest gif-browser request; stale conversions bail
         self._gifv_busy = set()   # inline-gif conversions in flight (dest paths)
+        self._upload_limit = None # Discord attachment cap (MB) for this account's Nitro tier; probed once
         atexit.register(lambda: self.voice_proc and self.voice_proc.kill())
         atexit.register(lambda: self.play_proc and self.play_proc.kill())
         self.conns = []
@@ -1292,9 +1293,10 @@ class DQS:
         finally:
             ev.set()   # release any send that's waiting on this upload
 
-    def _compress_for_discord(self, path):
-        """Shrink an image/video under Discord's ~10 MB cap. Returns the new
-        path (in /tmp) or None if the type isn't compressible or it fails."""
+    def _compress_for_discord(self, path, limit_mb=10):
+        """Shrink an image/video under this account's Discord cap (limit_mb).
+        Returns the new path (in /tmp) or None if the type isn't compressible
+        or it fails."""
         ext = os.path.splitext(path)[1].lower()
         out = os.path.join("/tmp", "dsqrd-compress-" + os.path.basename(path))
         try:
@@ -1305,8 +1307,9 @@ class DQS:
                      "-of", "default=noprint_wrappers=1:nokey=1", path],
                     capture_output=True, text=True).stdout.strip()
                 dur = float(dur or 0) or 1.0
-                # aim ~8.5 MB total, 96k audio, 6% mux headroom
-                vbr = int((8.5 * 8 * 1024 * 1024 / dur * 0.94) - 96000) // 1000
+                # aim ~85% of the cap total, 96k audio, 6% mux headroom
+                target = limit_mb * 0.85
+                vbr = int((target * 8 * 1024 * 1024 / dur * 0.94) - 96000) // 1000
                 vbr = max(200, vbr)
                 r = subprocess.run(
                     ["ffmpeg", "-y", "-v", "error", "-i", path,
@@ -1324,22 +1327,42 @@ class DQS:
                     return None
             else:
                 return None
-            if os.path.getsize(out) / (1024 * 1024) > 10:
+            if os.path.getsize(out) / (1024 * 1024) > limit_mb:
                 return None   # still too big — let the caller fall back to the toast
             return out
         except Exception as e:
             print(f"dsqrd: compress error {e!r}", flush=True)
             return None
 
+    # premium_type -> Discord attachment cap (MB). Each person runs their own
+    # daemon with their own token, so a friend without Nitro gets 10 and only
+    # compresses above that; a Nitro account gets its real, larger cap.
+    UPLOAD_LIMITS_MB = {0: 10, 1: 50, 2: 500, 3: 50}
+
+    def _upload_limit_mb(self):
+        """This account's upload cap, probed once from its Nitro tier and cached."""
+        if self._upload_limit is not None:
+            return self._upload_limit
+        limit = 10
+        try:
+            u = self.discord.get_user(self.discord.my_id, extra=True)
+            pt = ((u or {}).get("extra") or {}).get("premium_type") or 0
+            limit = self.UPLOAD_LIMITS_MB.get(pt, 10)
+        except Exception as e:
+            print(f"dsqrd: upload-limit probe failed {e!r}", flush=True)
+        self._upload_limit = limit
+        return limit
+
     def do_compress_upload(self, channel_id, thread, path, ev):
         """Compress an oversized image/video, then hand off to the normal
         staging upload. Runs on its own thread; ev released in the finally."""
         try:
+            limit = self._upload_limit_mb()
             self.broadcast({"type": "toast", "text": "Compressing…"})
-            small = self._compress_for_discord(path)
+            small = self._compress_for_discord(path, limit)
             if not small:
                 self.broadcast({"type": "attachReady", "channel": channel_id,
-                                "name": "", "ok": False, "err": "couldn't compress under 10 MB"})
+                                "name": "", "ok": False, "err": f"couldn't compress under {limit} MB"})
                 return
             self._stage_upload(channel_id, thread, small, os.path.basename(path))
         finally:
@@ -1359,17 +1382,19 @@ class DQS:
                 return fail("no file at that path")
             name = os.path.basename(path)
             mb = os.path.getsize(path) / (1024 * 1024)
-            # Discord caps uploads at 10 MB without nitro and rejects the SEND
-            # (413) after staging. If it's a compressible image/video, ask the
-            # UI whether to shrink it instead of uploading a doomed file.
-            if mb > 10:
+            # Discord rejects the SEND (413) after staging anything over this
+            # account's cap (Nitro-tier dependent, probed live). If it's a
+            # compressible image/video, ask the UI whether to shrink it instead
+            # of uploading a doomed file.
+            limit = self._upload_limit_mb()
+            if mb > limit:
                 if os.path.splitext(name)[1].lower() in self.COMPRESSIBLE:
                     self.broadcast({"type": "askCompress", "channel": channel_id,
                                     "thread": thread or "", "path": path,
-                                    "name": name, "mb": round(mb)})
+                                    "name": name, "mb": round(mb), "limit": limit})
                     return
                 self.broadcast({"type": "attachReady", "channel": channel_id, "name": "",
-                                "ok": False, "err": f"{name} is {mb:.0f} MB — over Discord's 10 MB limit"})
+                                "ok": False, "err": f"{name} is {mb:.0f} MB — over your {limit} MB Discord limit"})
                 return
             self._stage_upload(channel_id, thread, path, name)
         except Exception as e:

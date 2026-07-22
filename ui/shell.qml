@@ -831,7 +831,7 @@ FloatingWindow {
                     target: Backend
                     function onAskCompress(info) {
                         confirmCompress.target = info
-                        confirmCompress.ask(info.name + "  ·  " + info.mb + " MB → over Discord's 10 MB limit")
+                        confirmCompress.ask(info.name + "  ·  " + info.mb + " MB → over your " + (info.limit || 10) + " MB Discord limit")
                     }
                 }
             }
