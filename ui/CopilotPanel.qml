@@ -44,14 +44,27 @@ Item {
     // a one-line log with "I don't see a chat log, paste it".
     readonly property string _instr:
         "Catch me up on a Discord channel. Everything between the markers below is "
-      + "a chat log of the recent conversation in the channel. Give me the "
-      + "shortest possible catch-up: main topics, who said what that matters, and "
-      + "anything directed at me or that I should act on — a few terse lines, no "
-      + "filler, no preamble. The log may be very short — even a single line — "
-      + "just summarize whatever is there; never ask me to paste anything, the log "
-      + "is already below. Write the summary twice, first in English then in "
-      + "Swedish, in exactly this format with nothing outside the markers:\n"
+      + "a chat log of the recent conversation in the channel. Summarize it as "
+      + "markdown bullets: each bullet starts with '- ' and is ONE short line, "
+      + "with a blank line between bullets — max 5 bullets, fewer when the log "
+      + "is small; no filler, no preamble. Bold the key part of each bullet "
+      + "(speaker or topic) with **...**. I go by marsan, marzan, kottis, "
+      + "köttis, kottsamlaren, köttsamlaren or martin (any spelling variant): "
+      + "anything directed at me or that I should act on goes in its own bullet "
+      + "FIRST, starting with '- @me ' — never use @me on other bullets. The "
+      + "log may be very short — even a single line — just summarize whatever "
+      + "is there; never ask me to paste anything, the log is already below. "
+      + "Write the summary twice, first in English then in Swedish, in exactly "
+      + "this format with nothing outside the markers:\n"
       + "===EN===\n<summary in English>\n===SV===\n<summary in Swedish>\n\n"
+
+    // Bullets the model tagged "@me" (directed at me) get the same yellow
+    // highlight treatment as a real @-mention in chat: wrap the line in the
+    // private-use runes richify styles as a mention-of-you.
+    function _decorated(t) {
+        return t.replace(/(^|\n)-[ \t]*@me:?[ \t]*([^\n]*)/gi, (m, pre, rest) =>
+            pre + "- \ue001\ud83d\udccc " + rest + "\ue002")
+    }
 
     function toggleLang() { lang = lang === "en" ? "sv" : "en" }
     function show() {
@@ -302,7 +315,7 @@ Item {
                     id: body
                     width: parent.width
                     textFormat: Text.RichText
-                    text: Backend.richify(root.result, 18)
+                    text: Backend.richify(root._decorated(root.result), 18)
                     wrapMode: Text.Wrap
                     color: root.phase === "error" ? Theme.fg_muted : Theme.fg
                     font.family: Theme.fontFamily; font.hintingPreference: Font.PreferNoHinting
