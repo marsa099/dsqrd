@@ -1,4 +1,5 @@
 import QtQuick
+import Quickshell
 import Quickshell.Io
 import "."
 import QsLib
@@ -47,7 +48,10 @@ Item {
       + "a chat log of the recent conversation in the channel. Summarize it as "
       + "markdown bullets: each bullet starts with '- ' and is ONE short line, "
       + "with a blank line between bullets — max 5 bullets, fewer when the log "
-      + "is small; no filler, no preamble. Bold the key part of each bullet "
+      + "is small; no filler, no preamble. Be strictly factual: state only what "
+      + "the log explicitly says — never infer that something happened (a merge, "
+      + "a fix, a decision) unless it's stated outright; if ambiguous, say it's "
+      + "unclear instead of asserting. Bold the key part of each bullet "
       + "(speaker or topic) with **...**. I go by marsan, marzan, kottis, "
       + "köttis, kottsamlaren, köttsamlaren or martin (any spelling variant): "
       + "anything directed at me or that I should act on goes in its own bullet "
@@ -67,6 +71,70 @@ Item {
         return t.replace(/(^|\n)-[ \t]*@me:?[ \t]*([^\n]*)/gi, (m, pre, rest) =>
             pre + "- \ue001\ud83d\udccc " + rest + "\ue002")
     }
+
+    // ── feedback → standing rules ─────────────────────────────────────────
+    // `f` opens an inline feedback field (typed via shell.routeKey, the same
+    // keep-focus-in-the-shell pattern as the cheat sheet's search). Submitted
+    // feedback goes to opus 4.8, which curates a standing-rules list stored in
+    // ~/.local/share/dsqrd/copilot-feedback.md; the list is injected into every
+    // future summary prompt. Opus decides whether the feedback warrants a rule
+    // at all, so one-off gripes don't pollute the list.
+    property bool feedbackMode: false
+    property string feedbackText: ""
+    property bool feedbackBusy: false
+    property string rules: ""       // current standing rules, loaded from disk
+
+    function startFeedback() {
+        if (phase !== "ready" && phase !== "error") return
+        feedbackMode = true
+        feedbackText = ""
+    }
+    function cancelFeedback() { feedbackMode = false; feedbackText = "" }
+    function submitFeedback() {
+        const fb = feedbackText.trim()
+        feedbackMode = false
+        feedbackText = ""
+        if (fb.length === 0) return
+        feedbackBusy = true
+        fbProc.b64 = Qt.btoa(
+            "You maintain a short list of standing instructions that get appended to "
+          + "an LLM prompt which summarizes chat logs (a 'catch me up' feature). "
+          + "Decide whether the user's feedback below warrants changing the list. If "
+          + "it does, output the COMPLETE updated list: terse markdown bullets, "
+          + "deduplicated, merged where overlapping, generally applicable (not tied "
+          + "to one specific chat), max 10 bullets, in English. If it warrants no "
+          + "change, output the current list unchanged. Output ONLY the bullet list — "
+          + "no headers, no commentary. An empty current list is normal.\n\n"
+          + "===== CURRENT LIST =====\n" + rules + "\n===== END LIST =====\n\n"
+          + "===== USER FEEDBACK =====\n" + fb + "\n===== END FEEDBACK =====\n\n"
+          + "For context, the summary the user was looking at when giving feedback:\n"
+          + "===== SUMMARY =====\n" + resultEn + "\n===== END SUMMARY =====\n")
+        fbProc.running = true
+    }
+    Process {
+        id: fbProc
+        property string b64: ""
+        command: ["sh", "-c",
+            "d=\"$HOME/.local/share/dsqrd\"; mkdir -p \"$d\"; "
+          + "printf %s '" + b64 + "' | base64 -d | claude -p --model claude-opus-4-8 "
+          + "> \"$d/copilot-feedback.md.tmp\" 2>/tmp/dsqrd-copilot-fb.err "
+          + "&& [ -s \"$d/copilot-feedback.md.tmp\" ] "
+          + "&& mv \"$d/copilot-feedback.md.tmp\" \"$d/copilot-feedback.md\""]
+        onExited: (code, status) => {
+            root.feedbackBusy = false
+            if (code === 0) {
+                rulesLoader.running = true
+                root._cache = ({})   // stale: summaries predate the new rules
+                Backend.toast("Copilot: feedback inarbetad ✓")
+            } else Backend.toast("Copilot: kunde inte bearbeta feedback")
+        }
+    }
+    Process {
+        id: rulesLoader
+        command: ["sh", "-c", "cat \"$HOME/.local/share/dsqrd/copilot-feedback.md\" 2>/dev/null"]
+        stdout: StdioCollector { onStreamFinished: root.rules = (this.text || "").trim() }
+    }
+    Component.onCompleted: rulesLoader.running = true
 
     function toggleLang() { lang = lang === "en" ? "sv" : "en" }
     function show() {
@@ -105,6 +173,8 @@ Item {
         open = false
         phase = "idle"
         _pendingShow = false
+        feedbackMode = false
+        feedbackText = ""
     }
 
     // Speculative prefetch — the debounce below arms this on channel switch and
@@ -149,7 +219,9 @@ Item {
         // shell untouched, then decode straight into `claude`. Qt.btoa already
         // UTF-8-encodes the string, so pass it raw — wrapping it in
         // unescape(encodeURIComponent()) would double-encode and mojibake it.
-        proc.b64 = Qt.btoa(_instr + "===== CHAT LOG =====\n" + text + "\n===== END OF CHAT LOG =====")
+        proc.b64 = Qt.btoa(_instr
+            + (rules ? "Standing user rules — follow them strictly:\n" + rules + "\n\n" : "")
+            + "===== CHAT LOG =====\n" + text + "\n===== END OF CHAT LOG =====")
         proc.running = true
     }
     // Split the accumulated stream into the two language blocks. English comes
@@ -325,6 +397,45 @@ Item {
                     onLinkActivated: (url) => Backend.openUrl(url)
                 }
             }
+
+            // ── feedback: inline input (f) or processing pulse ─────────────
+            Column {
+                visible: root.feedbackMode || root.feedbackBusy
+                width: parent.width
+                spacing: 10
+                Rectangle { width: parent.width; height: 1; color: Theme.hairline }
+                Row {
+                    visible: root.feedbackMode
+                    width: parent.width
+                    spacing: 8
+                    Text { renderType: Text.NativeRendering; text: "Feedback:"
+                           color: Theme.sky; font.family: Theme.fontFamily
+                           font.hintingPreference: Font.PreferNoHinting; font.pixelSize: 13; font.weight: 600 }
+                    Text { renderType: Text.NativeRendering
+                           text: root.feedbackText + "▏"
+                           width: parent.width - 90
+                           wrapMode: Text.Wrap
+                           color: Theme.fg; font.family: Theme.fontFamily
+                           font.hintingPreference: Font.PreferNoHinting; font.pixelSize: 13 }
+                }
+                Row {
+                    visible: root.feedbackBusy
+                    spacing: 10
+                    Rectangle {
+                        width: 8; height: 8; radius: 4; color: Theme.sky
+                        anchors.verticalCenter: parent.verticalCenter
+                        SequentialAnimation on opacity {
+                            running: root.feedbackBusy; loops: Animation.Infinite
+                            NumberAnimation { from: 1; to: 0.25; duration: 550 }
+                            NumberAnimation { from: 0.25; to: 1; duration: 550 }
+                        }
+                    }
+                    Text { renderType: Text.NativeRendering; text: "Copilot arbetar in din feedback…"
+                           anchors.verticalCenter: parent.verticalCenter
+                           color: Theme.fg_muted; font.family: Theme.fontFamily
+                           font.hintingPreference: Font.PreferNoHinting; font.pixelSize: 13 }
+                }
+            }
         }
 
         // dismiss hint
@@ -333,11 +444,17 @@ Item {
             anchors.bottom: parent.bottom; anchors.bottomMargin: 12
             spacing: 6
             visible: root.phase !== "loading"
-            KeyCap { text: "l"; anchors.verticalCenter: parent.verticalCenter }
-            CapLabel { text: root.lang === "sv" ? "English" : "svenska"
+            KeyCap { visible: !root.feedbackMode; text: "l"; anchors.verticalCenter: parent.verticalCenter }
+            CapLabel { visible: !root.feedbackMode; text: root.lang === "sv" ? "English" : "svenska"
                        anchors.verticalCenter: parent.verticalCenter }
-            KeyCap { text: "q"; anchors.verticalCenter: parent.verticalCenter }
-            CapLabel { text: "stäng"; anchors.verticalCenter: parent.verticalCenter }
+            KeyCap { visible: !root.feedbackMode; text: "f"; anchors.verticalCenter: parent.verticalCenter }
+            CapLabel { visible: !root.feedbackMode; text: "feedback"; anchors.verticalCenter: parent.verticalCenter }
+            KeyCap { visible: !root.feedbackMode; text: "q"; anchors.verticalCenter: parent.verticalCenter }
+            CapLabel { visible: !root.feedbackMode; text: "stäng"; anchors.verticalCenter: parent.verticalCenter }
+            KeyCap { visible: root.feedbackMode; text: "enter"; anchors.verticalCenter: parent.verticalCenter }
+            CapLabel { visible: root.feedbackMode; text: "skicka"; anchors.verticalCenter: parent.verticalCenter }
+            KeyCap { visible: root.feedbackMode; text: "esc"; anchors.verticalCenter: parent.verticalCenter }
+            CapLabel { visible: root.feedbackMode; text: "avbryt"; anchors.verticalCenter: parent.verticalCenter }
         }
     }
 }

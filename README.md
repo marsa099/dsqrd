@@ -116,6 +116,8 @@ A **fork addition** — not in upstream `daphen/dsqrd`. A small button sits in t
 
 Tap it — or press `c` in a channel — and everything posted in the open channel since your last message is summarized into a single takeover "message" from Microsoft Copilot — main topics, who said what that matters, and anything directed at you to act on, kept as brief as possible. The summary is generated in both English and Swedish in one shot (English first and shown by default); `l` flips between them (the current language and the keybind are shown in the card). `q` or `esc` dismisses it; if you're already caught up it just says so.
 
+Press `f` on a summary to type feedback about it (`enter` sends, `esc` cancels). The feedback is handed to opus 4.8, which decides whether it warrants a standing rule and, if so, updates the curated rule list in `~/.local/share/dsqrd/copilot-feedback.md` — injected into every future summary prompt (the summary cache is cleared so the next `c` reflects the new rules).
+
 Three things keep it fast without wasting prompts: the reply **streams** into the card as it's generated; summaries are **cached per channel** keyed on the newest message ts (reopening `c` with nothing new is instant and free); and a **speculative prefetch** fires — debounced, only when ≥5 messages arrived since your last one and the cache is stale — on channel switch and when the window regains niri focus (the daemon broadcasts `appActive` flips), so after being away the summary is usually already there when you press `c`.
 
 <!-- screenshots: loading state · the summary takeover -->

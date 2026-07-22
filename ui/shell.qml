@@ -358,11 +358,20 @@ FloatingWindow {
 
     function routeKey(e) {
         const ctrl = e.modifiers & Qt.ControlModifier
-        // Copilot takeover: q / esc close it, l flips Swedish/English; swallow
-        // everything else so the app behind stays frozen while the summary is up.
+        // Copilot takeover: q / esc close it, l flips Swedish/English, f opens
+        // the feedback field (typed from here, like the cheat sheet's search);
+        // swallow everything else so the app behind stays frozen.
         if (copilot.open) {
-            if (e.key === Qt.Key_Escape || e.key === Qt.Key_Q) copilot.close()
-            else if (e.key === Qt.Key_L) copilot.toggleLang()
+            if (copilot.feedbackMode) {
+                if (e.key === Qt.Key_Escape) copilot.cancelFeedback()
+                else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter) copilot.submitFeedback()
+                else if (e.key === Qt.Key_Backspace) copilot.feedbackText = copilot.feedbackText.slice(0, -1)
+                else if (e.text && e.text.length === 1 && e.text.charCodeAt(0) >= 0x20) copilot.feedbackText += e.text
+            } else {
+                if (e.key === Qt.Key_Escape || e.key === Qt.Key_Q) copilot.close()
+                else if (e.key === Qt.Key_L) copilot.toggleLang()
+                else if (e.key === Qt.Key_F) copilot.startFeedback()
+            }
             e.accepted = true; return
         }
         // Cheat sheet: driven from here (the shell keeps focus; handing it to the
