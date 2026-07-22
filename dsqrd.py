@@ -1614,7 +1614,7 @@ class DQS:
                 out = subprocess.run(["niri", "msg", "--json", "focused-window"],
                                      capture_output=True, text=True, timeout=3).stdout
                 w = json.loads(out) if out.strip() else None
-                active = bool(w) and (w.get("title") == "discord-client")
+                active = bool(w) and (w.get("title") == "dsqrd")
             except Exception:
                 active = False
             # used to suppress notifications for the open channel; flips are

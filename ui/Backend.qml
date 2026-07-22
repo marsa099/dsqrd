@@ -795,9 +795,16 @@ Item {
     property string attachName: ""
     property bool _awaitingPaste: false   // Ctrl+V sent; awaiting the daemon's image-or-text verdict
     property string _pendingImagePath: "" // local file:// of a staged paste image (for optimistic preview)
+    // A send clears the composer synchronously, but the daemon's attach events
+    // (attachUploading/attachReady) arrive async — a straggler after the send
+    // used to resurrect the chip. Only honor those events while an upload the
+    // user actually started is still armed; clearAttach (called on every send)
+    // disarms it.
+    property bool _attachArmed: false
     function pasteImage(thread) {
         if (!currentChannelId) return
         _awaitingPaste = true
+        _attachArmed = true
         safeWrite(JSON.stringify({ type: "uploadClipboard", channel: currentChannelId, thread: thread || "" }) + "\n")
     }
     // Stage a file from disk (any type). Like pasteImage, it doesn't send —
@@ -805,6 +812,7 @@ Item {
     function uploadFile(path, thread) {
         if (!currentChannelId || !path) return
         attachState = "uploading"; attachName = path.split("/").pop()
+        _attachArmed = true
         safeWrite(JSON.stringify({ type: "uploadFile", channel: currentChannelId, path: path, thread: thread || "" }) + "\n")
     }
     // The daemon asked (askCompress) before uploading an oversized image/video;
@@ -812,6 +820,7 @@ Item {
     function compressUpload(channel, thread, path) {
         if (!channel || !path) return
         attachState = "uploading"; attachName = path.split("/").pop()
+        _attachArmed = true
         safeWrite(JSON.stringify({ type: "compressUpload", channel: channel, path: path, thread: thread || "" }) + "\n")
     }
     function dropAttach() {
@@ -819,7 +828,7 @@ Item {
         attachState = "none"; attachName = ""
         safeWrite(JSON.stringify({ type: "dropAttach", channel: currentChannelId }) + "\n")
     }
-    function clearAttach() { attachState = "none"; attachName = ""; _awaitingPaste = false; _pendingImagePath = "" }
+    function clearAttach() { attachState = "none"; attachName = ""; _awaitingPaste = false; _pendingImagePath = ""; _attachArmed = false }
     // Clipboard held no image → the focused input should paste text instead.
     signal pasteFallback()
     // A staged attachment finished uploading — drop into the composer so a bare
@@ -1169,6 +1178,7 @@ Item {
         else if (e.type === "attachUploading") {
             // Daemon found a clipboard image and began uploading → show the
             // "uploading" chip now. Text pastes never reach here, so no false flash.
+            if (!_attachArmed) return   // straggler after a send already cleared the composer
             _awaitingPaste = false
             attachState = "uploading"; attachName = e.name || "image"
             _pendingImagePath = e.path || ""
@@ -1176,6 +1186,7 @@ Item {
         else if (e.type === "attachReady") {
             // Upload finished (ok) — or no image / failed. A no-image verdict while
             // still awaiting the Ctrl+V result → paste the clipboard text instead.
+            if (!_attachArmed) return   // straggler after a send: don't resurrect the chip
             if (e.ok) { attachState = "ready"; attachName = e.name || "file"; attachSettled() }
             else if (_awaitingPaste) pasteFallback()
             else {
@@ -1681,6 +1692,12 @@ Item {
             parser: SplitParser { onRead: data => backend.onEvent(data) }
             onConnectionStateChanged: {
                 if (!connected) { reconnect.restart(); return }
+                // Stamp lastRecv on connect so the dead-socket timer measures 8s of
+                // silence from HERE, not from epoch 0. Without this the first tick
+                // (~1s in) always fired (now - 0 ≫ 8000) and tore down the in-flight
+                // bootstrap — a race only the slow daemon (dsqrd) lost, landing empty.
+                // A failed connect leaves lastRecv at 0, so retry-until-up still fires.
+                backend.lastRecv = Date.now()
                 // On (re)connect slkd re-sends the channel list; refresh the open
                 // channel's messages (and thread) too — a slkd restart drops the
                 // socket and would otherwise leave a stale/empty view.
@@ -1697,11 +1714,12 @@ Item {
     }
     Component.onCompleted: _redial()
 
-    // Re-dial whenever we haven't heard from the daemon recently. lastRecv starts
-    // at 0, so a cold start re-dials immediately instead of sitting empty until
-    // you reopen the window. The daemon pings every 3s; 8s of silence =
-    // dead/never-connected. A large tick gap means the session was frozen
-    // (suspend) — re-dial for a fresh bootstrap even if the socket survived.
+    // Re-dial whenever we haven't heard from the daemon recently. lastRecv is 0
+    // until the first successful connect (stamped in onConnectionStateChanged),
+    // so before a connection lands this fires every tick — retry-until-daemon-up.
+    // Once connected, the daemon pings every 3s; 8s of silence = dead. A large
+    // tick gap means the session was frozen (suspend) — re-dial for a fresh
+    // bootstrap even if the socket survived.
     Timer {
         id: reconnect
         interval: 1000; repeat: true; running: true
