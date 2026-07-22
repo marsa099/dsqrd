@@ -103,7 +103,7 @@ A stdlib-only Python script that talks to the running daemon's socket (same JSON
 dsqrd-cli channels [query]              # list channels
 dsqrd-cli messages <name> [-n N]        # print the last N messages (default 50)
 dsqrd-cli messages <name> --since-mine  # everything after my last message
-dsqrd-cli summary <name>                # AI catch-up summary of --since-mine, via `claude -p` (default model: haiku, override with --model)
+dsqrd-cli summary <name>                # AI catch-up summary of --since-mine, via `claude -p` (default model: opus 4.8, override with --model)
 ```
 
 Channel names match case-insensitively (exact, then substring). `--since-mine` pages back up to 500 messages looking for a message authored by you.
@@ -114,11 +114,11 @@ A **fork addition** — not in upstream `daphen/dsqrd`. A small button sits in t
 
 <!-- screenshot: the Copilot button in the composer (idle) -->
 
-Tap it — or press `c` in a channel — and everything posted in the open channel since your last message is summarized into a single takeover "message" from Microsoft Copilot — main topics, who said what that matters, and anything directed at you to act on, answered in the channel's own language. `q` or `esc` dismisses it; if you're already caught up it just says so.
+Tap it — or press `c` in a channel — and everything posted in the open channel since your last message is summarized into a single takeover "message" from Microsoft Copilot — main topics, who said what that matters, and anything directed at you to act on, kept as brief as possible. The summary is generated in both Swedish and English in one shot; `l` flips between them (the current language and the keybind are shown in the card). `q` or `esc` dismisses it; if you're already caught up it just says so.
 
 <!-- screenshots: loading state · the summary takeover -->
 
-Under the hood it's the same engine as `dsqrd-cli summary`: it takes the since-your-last-message transcript, sends it to `claude -p --model haiku` with a short catch-up prompt, and renders the reply. Branded Copilot, powered by Claude — so it needs the `claude` CLI on your `PATH`.
+Under the hood it's the same engine as `dsqrd-cli summary`: it takes the since-your-last-message transcript, sends it to `claude -p --model claude-opus-4-8` with a short catch-up prompt, and renders the reply. Branded Copilot, powered by Claude — so it needs the `claude` CLI on your `PATH`.
 
 ## Notes
 

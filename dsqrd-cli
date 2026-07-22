@@ -173,9 +173,10 @@ def summarize(text, model):
     # and replying "I don't see a chat log, paste it".
     prompt = (
         "Catch me up on a Discord channel. Everything between the markers below is "
-        "a chat log of the recent conversation in the channel. Give me a short "
-        "catch-up summary: main topics, who said what that matters, and "
-        "anything directed at me or that I should act on. Answer in the same "
+        "a chat log of the recent conversation in the channel. Give me the "
+        "shortest possible catch-up: main topics, who said what that matters, and "
+        "anything directed at me or that I should act on — a few terse lines, no "
+        "filler, no preamble. Answer in the same "
         "language as the chat. The log may be very short — even a single line — "
         "just summarize whatever is there; never ask me to paste anything, the log "
         "is already below.\n\n"
@@ -203,10 +204,11 @@ def main():
     p.add_argument("--since-mine", action="store_true",
                    help="only messages after the last one I sent")
     p.add_argument("--summary", action="store_true", help="AI-summarize instead of printing")
-    p.add_argument("--model", default="haiku", help="claude model for --summary (default haiku)")
+    p.add_argument("--model", default="claude-opus-4-8",
+                   help="claude model for --summary (default opus 4.8)")
     p = sub.add_parser("summary", help="AI summary of what I missed since my last message")
     p.add_argument("channel")
-    p.add_argument("--model", default="haiku")
+    p.add_argument("--model", default="claude-opus-4-8")
     p = sub.add_parser("send", help="send a message to a channel")
     p.add_argument("channel")
     p.add_argument("text", nargs="+", help="message text (@Name becomes a real mention)")

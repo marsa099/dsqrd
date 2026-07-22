@@ -356,10 +356,11 @@ FloatingWindow {
 
     function routeKey(e) {
         const ctrl = e.modifiers & Qt.ControlModifier
-        // Copilot takeover: q / esc close it; swallow everything else so the app
-        // behind stays frozen while the summary is up.
+        // Copilot takeover: q / esc close it, l flips Swedish/English; swallow
+        // everything else so the app behind stays frozen while the summary is up.
         if (copilot.open) {
             if (e.key === Qt.Key_Escape || e.key === Qt.Key_Q) copilot.close()
+            else if (e.key === Qt.Key_L) copilot.toggleLang()
             e.accepted = true; return
         }
         // Cheat sheet: driven from here (the shell keeps focus; handing it to the

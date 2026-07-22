@@ -17,31 +17,42 @@ Item {
 
     property bool open: false
     property string phase: "idle"   // "idle" | "loading" | "ready" | "error"
-    property string result: ""
+    // One prompt returns the summary in both languages; `l` flips between them
+    // for free (no re-prompt). Session-sticky: the chosen language survives
+    // closing and reopening the panel.
+    property string lang: "sv"      // "sv" | "en"
+    property string resultSv: ""
+    property string resultEn: ""
+    readonly property string result: lang === "sv" ? resultSv : resultEn
     property int sourceCount: 0
     readonly property string stamp: Qt.formatDateTime(new Date(), "HH:mm")
 
     // Copilot's summary prompt — kept in sync with dsqrd-cli's `summarize()`.
     // The transcript is wrapped in CHAT LOG markers in show(); the guardrails
-    // ("however short", "never ask me to paste") stop haiku from punting on a
-    // one-line log with "I don't see a chat log, paste it".
+    // ("however short", "never ask me to paste") stop the model from punting on
+    // a one-line log with "I don't see a chat log, paste it".
     readonly property string _instr:
         "Catch me up on a Discord channel. Everything between the markers below is "
-      + "a chat log of the recent conversation in the channel. Give me a short "
-      + "catch-up summary: main topics, who said what that matters, and "
-      + "anything directed at me or that I should act on. Answer in the same "
-      + "language as the chat. The log may be very short — even a single line — "
+      + "a chat log of the recent conversation in the channel. Give me the "
+      + "shortest possible catch-up: main topics, who said what that matters, and "
+      + "anything directed at me or that I should act on — a few terse lines, no "
+      + "filler, no preamble. The log may be very short — even a single line — "
       + "just summarize whatever is there; never ask me to paste anything, the log "
-      + "is already below.\n\n"
+      + "is already below. Write the summary twice, first in Swedish then in "
+      + "English, in exactly this format with nothing outside the markers:\n"
+      + "===SV===\n<summary in Swedish>\n===EN===\n<summary in English>\n\n"
 
+    function toggleLang() { lang = lang === "sv" ? "en" : "sv" }
     function show() {
         open = true
-        result = ""
+        resultSv = ""
+        resultEn = ""
         const c = Backend.catchupSince()
         sourceCount = c.count
         if (c.count === 0) {
             phase = "ready"
-            result = "Inget att sammanfatta i den här kanalen än. ✨"
+            resultSv = "Inget att sammanfatta i den här kanalen än. ✨"
+            resultEn = "Nothing to summarize in this channel yet. ✨"
             return
         }
         phase = "loading"
@@ -61,13 +72,24 @@ Item {
     Process {
         id: proc
         property string b64: ""
-        command: ["sh", "-c", "printf %s '" + b64 + "' | base64 -d | claude -p --model haiku 2>/tmp/dsqrd-copilot.err"]
+        command: ["sh", "-c", "printf %s '" + b64 + "' | base64 -d | claude -p --model claude-opus-4-8 2>/tmp/dsqrd-copilot.err"]
         stdout: StdioCollector {
             onStreamFinished: {
                 proc.running = false
                 const t = (this.text || "").trim()
-                if (t.length > 0) { root.result = t; root.phase = "ready" }
-                else { root.result = "Copilot kunde inte sammanfatta just nu."; root.phase = "error" }
+                if (t.length > 0) {
+                    // Split out the two language blocks; if the model ignored the
+                    // markers, show the raw text in both languages rather than nothing.
+                    const en = t.split("===EN===")
+                    const sv = en[0].split("===SV===")
+                    root.resultSv = (sv.length > 1 ? sv[sv.length - 1] : en[0]).trim()
+                    root.resultEn = (en.length > 1 ? en[1] : root.resultSv).trim()
+                    root.phase = "ready"
+                } else {
+                    root.resultSv = "Copilot kunde inte sammanfatta just nu."
+                    root.resultEn = "Copilot couldn't summarize right now."
+                    root.phase = "error"
+                }
             }
         }
     }
@@ -131,6 +153,7 @@ Item {
                     Text { renderType: Text.NativeRendering
                            text: "Sammanfattning · #" + Backend.currentChannel
                                  + (root.sourceCount > 0 ? "  ·  " + root.sourceCount + " meddelanden" : "")
+                                 + "  ·  " + (root.lang === "sv" ? "svenska" : "English")
                            color: Theme.fg_muted; font.family: Theme.fontFamily
                            font.hintingPreference: Font.PreferNoHinting; font.pixelSize: 12 }
                 }
@@ -188,6 +211,9 @@ Item {
             anchors.bottom: parent.bottom; anchors.bottomMargin: 12
             spacing: 6
             visible: root.phase !== "loading"
+            KeyCap { text: "l"; anchors.verticalCenter: parent.verticalCenter }
+            CapLabel { text: root.lang === "sv" ? "English" : "svenska"
+                       anchors.verticalCenter: parent.verticalCenter }
             KeyCap { text: "q"; anchors.verticalCenter: parent.verticalCenter }
             CapLabel { text: "stäng"; anchors.verticalCenter: parent.verticalCenter }
         }
