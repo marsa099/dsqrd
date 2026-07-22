@@ -36,6 +36,9 @@ Item {
     property alias messages: messagesModel
     property string currentChannel: ""     // display name of the open channel
     property string currentChannelId: ""   // wire key (globally-unique Slack id)
+    // Whether our client window is niri-focused — the daemon watches niri and
+    // broadcasts flips (CopilotPanel prefetches on the rising edge).
+    property bool appActive: false
     property string currentTopic: ""
     property bool   typing: false
     property string typingWho: ""
@@ -631,7 +634,11 @@ Item {
         // messages: a recap of the recent conversation beats summarizing a lone
         // "lol" — or replying "1 message" and asking me to paste a log.
         const rows = since.length >= 3 ? since : arr.slice(-50).map(fmt)
-        return { text: rows.join("\n"), count: rows.length }
+        // sinceCount = raw "new since my last message" count (the prefetch
+        // threshold); lastTs keys the summary cache to the channel's newest
+        // message, so any new arrival invalidates it.
+        return { text: rows.join("\n"), count: rows.length, sinceCount: since.length,
+                 lastTs: arr.length > 0 ? String(arr[arr.length - 1].ts || "") : "" }
     }
     // Date grouping for the message list: a stable YYYYMMDD key per message, and
     // a friendly label (Today/Yesterday/weekday) for the section divider.
@@ -1063,6 +1070,7 @@ Item {
         else if (e.type === "delete") applyDelete(e.channel, e.ts)
         else if (e.type === "browse") { browseResults = e.channels || []; browseLoaded() }
         else if (e.type === "toast") { if (e.text) toast(e.text) }
+        else if (e.type === "appActive") appActive = e.active === true
         else if (e.type === "resync") {
             // daemon woke from suspend or its gateway re-identified: events
             // from the gap were never delivered — refetch what's on screen

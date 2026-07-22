@@ -18,14 +18,25 @@ Item {
     property bool open: false
     property string phase: "idle"   // "idle" | "loading" | "ready" | "error"
     // One prompt returns the summary in both languages; `l` flips between them
-    // for free (no re-prompt). Session-sticky: the chosen language survives
-    // closing and reopening the panel.
-    property string lang: "sv"      // "sv" | "en"
+    // for free (no re-prompt). English is generated first and is the default
+    // view, so streamed text is readable immediately. Session-sticky: the
+    // chosen language survives closing and reopening the panel.
+    property string lang: "en"      // "en" | "sv"
     property string resultSv: ""
     property string resultEn: ""
-    readonly property string result: lang === "sv" ? resultSv : resultEn
+    // While streaming, the not-yet-generated language falls back to the other
+    // one instead of showing an empty card.
+    readonly property string result: lang === "en" ? (resultEn || resultSv) : (resultSv || resultEn)
     property int sourceCount: 0
     readonly property string stamp: Qt.formatDateTime(new Date(), "HH:mm")
+
+    // Per-channel summary cache: channelId → {ts, en, sv}. An entry is fresh
+    // while the channel's newest message ts still matches — so reopening `c`
+    // with nothing new, or a completed prefetch, costs no prompt.
+    property var _cache: ({})
+    // `c` pressed while a job for a different channel/ts was mid-flight: let it
+    // finish (its result still lands in _cache), then re-run show().
+    property bool _pendingShow: false
 
     // Copilot's summary prompt — kept in sync with dsqrd-cli's `summarize()`.
     // The transcript is wrapped in CHAT LOG markers in show(); the guardrails
@@ -38,11 +49,11 @@ Item {
       + "anything directed at me or that I should act on — a few terse lines, no "
       + "filler, no preamble. The log may be very short — even a single line — "
       + "just summarize whatever is there; never ask me to paste anything, the log "
-      + "is already below. Write the summary twice, first in Swedish then in "
-      + "English, in exactly this format with nothing outside the markers:\n"
-      + "===SV===\n<summary in Swedish>\n===EN===\n<summary in English>\n\n"
+      + "is already below. Write the summary twice, first in English then in "
+      + "Swedish, in exactly this format with nothing outside the markers:\n"
+      + "===EN===\n<summary in English>\n===SV===\n<summary in Swedish>\n\n"
 
-    function toggleLang() { lang = lang === "sv" ? "en" : "sv" }
+    function toggleLang() { lang = lang === "en" ? "sv" : "en" }
     function show() {
         open = true
         resultSv = ""
@@ -55,37 +66,133 @@ Item {
             resultEn = "Nothing to summarize in this channel yet. ✨"
             return
         }
+        const hit = _cache[Backend.currentChannelId]
+        if (hit && hit.ts === c.lastTs) {
+            resultEn = hit.en; resultSv = hit.sv
+            phase = "ready"
+            return
+        }
         phase = "loading"
+        if (proc.running) {
+            // A prefetch for exactly this channel+ts is mid-flight: attach to
+            // its stream. Anything else: wait for it to finish (killing it
+            // wastes the already-spent prompt), then show() re-runs.
+            if (proc.jobChannel === Backend.currentChannelId && proc.jobTs === c.lastTs) {
+                if (proc.acc.length > 0) { _applyPartial(proc.acc); if (result.length > 0) phase = "ready" }
+            } else _pendingShow = true
+            return
+        }
+        _startJob(Backend.currentChannelId, c.lastTs, c.text)
+    }
+    function close() {
+        // Deliberately leaves a running job alive: it finishes into _cache, so
+        // the prompt isn't wasted and the next `c` is instant.
+        open = false
+        phase = "idle"
+        _pendingShow = false
+    }
+
+    // Speculative prefetch — the debounce below arms this on channel switch and
+    // on the window regaining focus. Only spends a prompt when ≥5 messages
+    // arrived since my last one and neither the cache nor a running job already
+    // covers them; the result lands in _cache so pressing `c` is instant.
+    function maybePrefetch() {
+        if (open || proc.running) return
+        const c = Backend.catchupSince()
+        if (c.sinceCount < 5 || !c.lastTs) return
+        const hit = _cache[Backend.currentChannelId]
+        if (hit && hit.ts === c.lastTs) return
+        _startJob(Backend.currentChannelId, c.lastTs, c.text)
+    }
+    Timer {
+        id: prefetchTimer
+        interval: 1500
+        onTriggered: root.maybePrefetch()
+    }
+    Connections {
+        target: Backend
+        // Channel switch (also fires on startup when the first channel loads).
+        function onCurrentChannelIdChanged() { prefetchTimer.restart() }
+        // Window refocused after being away — the daemon watches niri and
+        // broadcasts the flip, so this also covers "open dsqrd after hours".
+        function onAppActiveChanged() { if (Backend.appActive) prefetchTimer.restart() }
+    }
+    Connections {
+        // Messages still pouring in (fresh history after a switch, or a live
+        // burst): extend an armed debounce so we summarize the settled view.
+        // Only extends — arrivals alone never arm a prefetch, or every busy
+        // channel would burn prompts continuously.
+        target: Backend.messages
+        function onCountChanged() { if (prefetchTimer.running) prefetchTimer.restart() }
+    }
+
+    function _startJob(channel, ts, text) {
+        proc.jobChannel = channel
+        proc.jobTs = ts
+        proc.acc = ""
         // base64 the prompt so the transcript (åäö, emoji, quotes) survives the
         // shell untouched, then decode straight into `claude`. Qt.btoa already
         // UTF-8-encodes the string, so pass it raw — wrapping it in
         // unescape(encodeURIComponent()) would double-encode and mojibake it.
-        proc.b64 = Qt.btoa(_instr + "===== CHAT LOG =====\n" + c.text + "\n===== END OF CHAT LOG =====")
+        proc.b64 = Qt.btoa(_instr + "===== CHAT LOG =====\n" + text + "\n===== END OF CHAT LOG =====")
         proc.running = true
     }
-    function close() {
-        open = false
-        if (proc.running) proc.running = false
-        phase = "idle"
+    // Split the accumulated stream into the two language blocks. English comes
+    // first, so it fills progressively; Swedish stays empty until its marker
+    // arrives. If the model ignored the markers, everything counts as English.
+    function _applyPartial(t) {
+        const sv = t.split("===SV===")
+        const en = sv[0].split("===EN===")
+        resultEn = (en.length > 1 ? en[en.length - 1] : sv[0]).trim()
+        resultSv = (sv.length > 1 ? sv[1] : "").trim()
     }
 
     Process {
         id: proc
         property string b64: ""
-        command: ["sh", "-c", "printf %s '" + b64 + "' | base64 -d | claude -p --model claude-opus-4-8 2>/tmp/dsqrd-copilot.err"]
-        stdout: StdioCollector {
-            onStreamFinished: {
-                proc.running = false
-                const t = (this.text || "").trim()
-                if (t.length > 0) {
-                    // Split out the two language blocks; if the model ignored the
-                    // markers, show the raw text in both languages rather than nothing.
-                    const en = t.split("===EN===")
-                    const sv = en[0].split("===SV===")
-                    root.resultSv = (sv.length > 1 ? sv[sv.length - 1] : en[0]).trim()
-                    root.resultEn = (en.length > 1 ? en[1] : root.resultSv).trim()
-                    root.phase = "ready"
-                } else {
+        property string jobChannel: ""
+        property string jobTs: ""
+        property string acc: ""
+        // stream-json + partial messages so the summary renders as it's
+        // generated instead of after Opus finishes (-p requires --verbose for
+        // stream-json output).
+        command: ["sh", "-c", "printf %s '" + b64 + "' | base64 -d | claude -p --model claude-opus-4-8 --output-format stream-json --include-partial-messages --verbose 2>/tmp/dsqrd-copilot.err"]
+        stdout: SplitParser {
+            onRead: (line) => {
+                let ev
+                try { ev = JSON.parse(line) } catch (x) { return }
+                if (ev.type === "stream_event") {
+                    const d = ev.event && ev.event.delta
+                    if (d && d.type === "text_delta" && d.text) {
+                        proc.acc += d.text
+                        if (root.open && !root._pendingShow && proc.jobChannel === Backend.currentChannelId) {
+                            root._applyPartial(proc.acc)
+                            if (root.phase === "loading" && root.result.length > 0) root.phase = "ready"
+                        }
+                    }
+                } else if (ev.type === "result" && ev.subtype === "success" && typeof ev.result === "string") {
+                    proc.acc = ev.result   // authoritative full text
+                }
+            }
+        }
+        onExited: (code, status) => {
+            const t = proc.acc.trim()
+            const ok = code === 0 && t.length > 0
+            if (ok) {
+                const sv = t.split("===SV===")
+                const en = sv[0].split("===EN===")
+                const enTxt = (en.length > 1 ? en[en.length - 1] : sv[0]).trim()
+                const svTxt = ((sv.length > 1 ? sv[1] : "").trim()) || enTxt
+                root._cache[proc.jobChannel] = { ts: proc.jobTs, en: enTxt, sv: svTxt }
+            }
+            if (root._pendingShow) {
+                root._pendingShow = false
+                if (root.open) root.show()   // re-check: likely a cache hit now, else start the right job
+                return
+            }
+            if (root.open && proc.jobChannel === Backend.currentChannelId) {
+                if (ok) { root._applyPartial(t); if (root.resultSv === "") root.resultSv = root.resultEn; root.phase = "ready" }
+                else if (root.phase === "loading") {
                     root.resultSv = "Copilot kunde inte sammanfatta just nu."
                     root.resultEn = "Copilot couldn't summarize right now."
                     root.phase = "error"

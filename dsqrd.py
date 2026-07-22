@@ -1576,7 +1576,11 @@ class DQS:
                 active = bool(w) and (w.get("title") == "discord-client")
             except Exception:
                 active = False
-            self.app_active = active   # used to suppress notifications for the open channel
+            # used to suppress notifications for the open channel; flips are
+            # broadcast so the UI can prefetch the Copilot catch-up on refocus
+            if active != self.app_active:
+                self.app_active = active
+                self.broadcast({"type": "appActive", "active": active})
             time.sleep(1)
 
     def heartbeat(self):
