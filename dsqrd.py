@@ -971,13 +971,54 @@ class DQS:
             self._call(f"send ch={channel_id}", self.discord.send_message, channel_id, text,
                        None, None, None, True, atts)
 
+    def do_download(self, images):
+        """S in the client: save the message's media to ~/Downloads. Opening
+        media streams or caches ephemerally; this is the keep-a-copy action."""
+        dl = os.environ.get("XDG_DOWNLOAD_DIR") or os.path.expanduser("~/Downloads")
+        os.makedirs(dl, exist_ok=True)
+        saved, last = 0, ""
+        for im in images:
+            url = im.get("url")
+            if not url:
+                continue
+            name = im.get("name") or f"{im.get('id', 'file')}.{im.get('ext') or 'bin'}"
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
+                with urllib.request.urlopen(req, timeout=600) as r, open(os.path.join(dl, name), "wb") as f:
+                    shutil.copyfileobj(r, f)
+                saved += 1
+                last = name
+            except Exception as e:
+                print(f"dsqrd: download error {e!r}", flush=True)
+        text = ("Couldn't download" if not saved
+                else f"Saved {last} to Downloads" if saved == 1
+                else f"Saved {saved} files to Downloads")
+        self.broadcast({"type": "toast", "text": text})
+
     def do_view(self, conn, images, mediatype):
         """Download the message's full-res media to a dedicated, easy-to-purge dir
         (~/.cache/dsqrd/view) and tell the client to open them (viewReady). A photo
         set opens together so imv can page between them. Entries in one message
-        share the message id, so the loop index disambiguates filenames."""
+        share the message id, so the loop index disambiguates filenames.
+        A lone video STREAMS straight into mpv instead (window opens immediately
+        and buffers — big files outlive the UI's patience otherwise)."""
         viewdir = os.path.expanduser("~/.cache/dsqrd/view")
         os.makedirs(viewdir, exist_ok=True)
+        if mediatype == "video" and len(images) == 1 and images[0].get("url"):
+            im = images[0]
+            ext = im.get("ext") or os.path.splitext((im.get("url") or "").split("?")[0])[1].lstrip(".") or "mp4"
+            cached = os.path.join(viewdir, f"{im.get('id') or 'v'}-0.{ext}")
+            if not os.path.exists(cached):
+                try:
+                    # size like media-viewer.sh's mpv (75%x85% of the screen) —
+                    # native-size windows are tiny for small recordings
+                    subprocess.Popen(["mpv", "--no-terminal", "--force-window=immediate",
+                                      "--autofit=75%x85%", "--loop", im["url"]],
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    self.write(conn, {"type": "viewSpawned"})
+                    return
+                except OSError:
+                    pass  # mpv missing — fall through to download-then-open
         paths = []
         for i, im in enumerate(images):
             url = im.get("url")
@@ -1637,6 +1678,8 @@ class DQS:
                 elif t == "view" and (cmd.get("images") or cmd.get("url")):
                     imgs = cmd.get("images") or [{"id": cmd.get("id"), "url": cmd.get("url"), "ext": cmd.get("ext", "")}]
                     threading.Thread(target=self.do_view, args=(conn, imgs, cmd.get("mediatype", "img")), daemon=True).start()
+                elif t == "download" and cmd.get("images"):
+                    threading.Thread(target=self.do_download, args=(cmd["images"],), daemon=True).start()
                 elif t == "presence":
                     threading.Thread(target=self.set_presence, args=(cmd.get("state") != "idle",), daemon=True).start()
                 elif t == "gifs":

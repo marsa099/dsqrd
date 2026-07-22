@@ -1118,6 +1118,12 @@ Item {
             if (!ps || (Array.isArray(ps) && ps.length === 0)) { mediaLoading = false; toast("Couldn’t open media") }
             else { openViewer(ps, e.mediatype); mediaGraceTimer.restart() }  // keep indicator up while the viewer launches
         }
+        // The daemon opened the media itself (video streamed into mpv) — no
+        // path to hand the viewer script; just wind down the loading state.
+        else if (e.type === "viewSpawned") {
+            mediaLoadTimer.stop()
+            mediaGraceTimer.restart()
+        }
         else if (e.type === "open") openFromNotification(e.workspace, e.channel, e.thread)
         else if (e.type === "typing") showTyping(e.channel, e.thread, e.user)
         else if (e.type === "presence") {
@@ -1283,6 +1289,20 @@ Item {
     // viewer (mpv especially) still takes a beat to appear. Hold the indicator for a
     // grace window after viewReady so it's visible on cached opens too.
     Timer { id: mediaGraceTimer; interval: 2500; onTriggered: backend.mediaLoading = false }
+    // S — save the message's media to ~/Downloads. Opening media streams or
+    // caches ephemerally; this is the deliberate keep-a-copy action.
+    function downloadMedia(msg) {
+        if (!msg) return
+        let imgs
+        try { imgs = JSON.parse(msg.imagesJson || "[]") } catch (e) { return }
+        imgs = imgs.filter(function (i) { return i.full && i.type !== "music" })
+        if (!imgs.length) { toast("nothing to download"); return }
+        const items = imgs.map(function (i) {
+            return { id: i.id, url: i.full, ext: i.ext || "", name: i.name || "" }
+        })
+        safeWrite(JSON.stringify({ type: "download", channel: currentChannelId, images: items }) + "\n")
+        toast("downloading…")
+    }
     function viewImage(msg) {
         if (!msg) return
         let imgs
@@ -1316,7 +1336,7 @@ Item {
         const arr = Array.isArray(paths) ? paths : [paths]
         // strip file://; newline-join so the script opens them all together.
         const raw = arr.map(function (p) { return p.indexOf("file://") === 0 ? p.slice(7) : p })
-        Quickshell.execDetached([(Quickshell.env("SLK_MEDIA_VIEWER") || (Quickshell.env("HOME") + "/.config/endcord/media-viewer.sh")), raw.join("\n"), mediatype || "img"])
+        Quickshell.execDetached([(Quickshell.env("SLK_MEDIA_VIEWER") || (Quickshell.env("HOME") + "/.config/slk-gui/media-viewer.sh")), raw.join("\n"), mediatype || "img"])
     }
     // Enter on a message with exactly one obvious action performs it:
     // media → viewer, link/#channel → open. Both or neither → false, so the
