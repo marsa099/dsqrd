@@ -1382,6 +1382,24 @@ Item {
     function openLink(msg) {
         if (msg && msg.link) openUrl(msg.link)
     }
+    // Every URL in a message, in order, deduped — the daemon's `link` field only
+    // carries the first one, so the shell's multi-link chooser re-extracts from
+    // the text. Trailing punctuation is trimmed the way `link` consumers expect.
+    function extractLinks(msg) {
+        if (!msg) return []
+        const out = [], seen = ({})
+        const re = /https?:\/\/[^\s<>"')\]]+/g
+        const t = (msg.text || "") + "\n" + (msg.link || "")
+        let m
+        while ((m = re.exec(t)) !== null) {
+            const u = m[0].replace(/[.,;:!?]+$/, "")
+            if (u && !seen[u]) { seen[u] = true; out.push(u) }
+        }
+        return out
+    }
+    function hasChannelRef(msg) {
+        return !!(msg && msg.channelRef && _findChannel(msg.channelRef))
+    }
     // `o` on a message: if it mentions a #channel you're in, open that channel;
     // else open the first URL; else — media-only message — open the media like
     // `v` (pressing o on a photo is the natural reflex). Mixed messages keep

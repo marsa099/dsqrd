@@ -1874,7 +1874,8 @@ class DQS:
                 self._issues_etag = r.headers.get("ETag") or self._issues_etag
                 data = json.loads(r.read().decode())
             issues = [{"number": i.get("number"), "title": i.get("title") or "",
-                       "state": i.get("state") or "open"}
+                       "state": i.get("state") or "open",
+                       "url": i.get("html_url") or ""}
                       for i in data if "pull_request" not in i]
             self.issues_event = {"type": "issueTracker", "issues": issues}
             self.broadcast(self.issues_event)

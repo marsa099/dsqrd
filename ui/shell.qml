@@ -81,6 +81,15 @@ FloatingWindow {
     function goTop()       { focusedPanel === "sidebar" ? sidebar.toTop()    : msgs.toTop() }
     function goBottom()    { focusedPanel === "sidebar" ? sidebar.toBottom() : msgs.toBottom() }
     function reactTo(msg)  { if (msg) { emojiPicker.target = msg; emojiPicker.show() } }
+    // `o`: a #channel mention or a single link keeps the instant-open behavior;
+    // several links pop the numbered chooser instead of silently opening the
+    // first one.
+    function openMsgLinks(msg) {
+        if (!msg) return
+        const links = Backend.extractLinks(msg)
+        if (links.length >= 2 && !Backend.hasChannelRef(msg)) linkPicker.show(links)
+        else Backend.openChannelRef(msg)
+    }
     function askDelete(msg) { if (msg && msg.ts) { confirmDelete.target = msg; confirmDelete.ask(Backend.plainText(msg.text)) } }
     function activate() {
         if (focusedPanel === "sidebar") { sidebar.openCurrent(); focusPanel("messages") }
@@ -252,7 +261,7 @@ FloatingWindow {
             "S":        { act: () => { if (focusedPanel === "messages") Backend.downloadMedia(msgs.currentMessage()) }, help: "Save media", cat: "msg" },
             "r":        { act: () => { if (focusedPanel === "messages") reactTo(msgs.currentMessage()) }, help: "React", cat: "msg" },
             "y":        { act: () => { if (focusedPanel === "messages") Backend.copyText(msgs.currentMessage()) }, help: "Copy text", cat: "msg" },
-            "o":        { act: () => { if (focusedPanel === "messages") Backend.openChannelRef(msgs.currentMessage()) }, help: "Open link", cat: "msg" },
+            "o":        { act: () => { if (focusedPanel === "messages") win.openMsgLinks(msgs.currentMessage()) }, help: "Open link(s)", cat: "msg" },
             "v":        { act: () => { if (focusedPanel === "messages") Backend.viewImage(msgs.currentMessage()) }, help: "View image", cat: "msg" },
             // voice notes are Discord-only (Slack's clips API is closed)
             "V":        { act: () => { if (win.isDiscord) Backend.voiceRecord() },
@@ -265,6 +274,7 @@ FloatingWindow {
                           help: () => "View profile", cat: "msg" },
             // views & general
             "?":        { act: () => help.show(), help: "This help", cat: "view" },
+            "!":        { act: () => issuesPanel.show(), help: "Upstream issues", cat: "view" },
             "ctrl+shift+r": { act: () => Backend.checkForUpdates(), help: "Check for updates", cat: "view" },
             "U":        { act: () => { if (Backend.updateAvailable) Backend.applyUpdate(); else win.uploadClipboardPath() }, help: "Upload file path from clipboard", cat: "chats" },
             "esc":      { act: () => backToNormal(), help: "Back to normal", cat: "view" },
@@ -285,7 +295,7 @@ FloatingWindow {
                         help: () => Backend.railHidden ? "" : "DM author", cat: "msg" },
             "P":      { act: () => { const m = thread.currentMessage(); if (m && m.uid) Backend.openProfile(m.uid) },
                         help: () => "View profile", cat: "msg" },
-            "o":      { act: () => Backend.openChannelRef(thread.currentMessage()), help: "Open link", cat: "msg" },
+            "o":      { act: () => win.openMsgLinks(thread.currentMessage()), help: "Open link(s)", cat: "msg" },
             "r":      { act: () => reactTo(thread.currentMessage()), help: "React", cat: "msg" },
             "y":      { act: () => Backend.copyText(thread.currentMessage()), help: "Copy text", cat: "msg" },
             "Y":      { act: () => Backend.copyLink(thread.currentMessage()), help: "Copy message link", cat: "msg" },
@@ -369,6 +379,18 @@ FloatingWindow {
                 else if (e.key === Qt.Key_L) copilot.toggleLang()
                 else if (e.key === Qt.Key_F) copilot.startFeedback()
             }
+            e.accepted = true; return
+        }
+        // Issue tracker / link chooser takeovers: identical list interface
+        // (move / openAt / openCurrent / close), driven from here like the
+        // other overlays; swallow everything else.
+        if (issuesPanel.open || linkPicker.open) {
+            const p = issuesPanel.open ? issuesPanel : linkPicker
+            if (e.key === Qt.Key_Escape || e.key === Qt.Key_Q) p.close()
+            else if (e.key === Qt.Key_J || e.key === Qt.Key_Down) p.move(1)
+            else if (e.key === Qt.Key_K || e.key === Qt.Key_Up) p.move(-1)
+            else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_O) p.openCurrent()
+            else if (e.text >= "1" && e.text <= "9" && e.text.length === 1) p.openAt(parseInt(e.text) - 1)
             e.accepted = true; return
         }
         // Cheat sheet: driven from here (the shell keeps focus; handing it to the
@@ -733,7 +755,8 @@ FloatingWindow {
                 }
                 // Quiet tracker for feature requests filed on daphen's upstream —
                 // deliberately low-key (fg_muted, no chip). Yields the corner to
-                // the orange update message when one is pending.
+                // the orange update message when one is pending. Click (or `!`)
+                // opens the issues takeover.
                 Text {
                     id: issueStatus
                     visible: !Backend.updateAvailable && text !== ""
@@ -742,6 +765,8 @@ FloatingWindow {
                     text: Backend.issueSummary
                     color: Theme.fg_muted
                     font.family: Theme.fontFamily; font.hintingPreference: Font.PreferNoHinting; font.pixelSize: 12
+                    HoverHandler { cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: issuesPanel.show() }
                 }
                 Text {
                     visible: Backend.updateAvailable
@@ -838,6 +863,20 @@ FloatingWindow {
             CopilotPanel {
                 id: copilot
                 z: 104
+                onOpenChanged: if (!open) win.backToNormal()
+            }
+
+            // Upstream issue tracker takeover (`!` / clicking the statusbar line).
+            IssuesPanel {
+                id: issuesPanel
+                z: 105
+                onOpenChanged: if (!open) win.backToNormal()
+            }
+
+            // Link chooser for `o` on a message with several URLs.
+            LinkPicker {
+                id: linkPicker
+                z: 105
                 onOpenChanged: if (!open) win.backToNormal()
             }
 

@@ -19,3 +19,5 @@ WorkspacePicker WorkspacePicker.qml
 ConfirmDialog ConfirmDialog.qml
 KeybindHelp KeybindHelp.qml
 CopilotPanel CopilotPanel.qml
+IssuesPanel IssuesPanel.qml
+LinkPicker LinkPicker.qml
