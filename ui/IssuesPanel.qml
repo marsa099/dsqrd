@@ -26,7 +26,7 @@ Item {
     }
     function openAt(i) {
         const it = issues[i]
-        if (it && it.url) { Qt.openUrlExternally(it.url); close() }
+        if (it && it.url) { Backend.openUrl(it.url); close() }
     }
     function openCurrent() { openAt(cursor) }
 

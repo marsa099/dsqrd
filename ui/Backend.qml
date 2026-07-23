@@ -743,6 +743,20 @@ Item {
             if (openPermalink(m[1], ts, tm ? tm[1] : "", sub, url)) return
         }
         Qt.openUrlExternally(url)
+        _focusBrowser()
+    }
+    // Bring the browser forward after handing off a URL. xdg-open lands the tab
+    // in the already-running browser on whatever workspace it lives, and niri
+    // never jumps focus across workspaces on its own — so without this the
+    // opened link is invisible and `o`/the pickers look like they did nothing.
+    // Polls briefly so a cold-started browser window is caught too.
+    function _focusBrowser() {
+        Quickshell.execDetached(["sh", "-c",
+            "for i in $(seq 40); do "
+          + "id=$(niri msg --json windows | jq -r '[.[] | select((.app_id // \"\") | test(\"helium|zen|firefox|chromium|brave\"; \"i\"))] "
+          + "| sort_by(.focus_timestamp.secs // 0, .focus_timestamp.nanos // 0) | last | .id // empty'); "
+          + "[ -n \"$id\" ] && exec niri msg action focus-window --id \"$id\"; "
+          + "sleep 0.15; done"])
     }
 
     // Open a Slack message permalink in-client: switch to its workspace/channel
