@@ -15,6 +15,8 @@ Rectangle {
     signal threadsClicked()
     signal mentionsClicked()
     signal workspacePickerRequested()
+    // the delegate under the cursor — mute-menu anchor + target (id/name/kind/muted)
+    property alias cursorItem: list.currentItem
 
     // Pinned virtual rows above the channel list: Threads, then Mentions.
     // Counts walk through them like list rows (13k from row 5 included).
@@ -244,6 +246,7 @@ Rectangle {
                 required property string kind
                 required property int unread
                 required property bool mention
+                required property bool muted
                 required property string topic
                 required property string avatar
                 required property string user
@@ -254,8 +257,9 @@ Rectangle {
                 readonly property bool cursor: list.currentIndex === index
                 // Mentions and DMs are "loud" unreads — a filled accent badge,
                 // not a quiet count. Section-agnostic, so starred and unstarred
-                // rows render identically.
-                readonly property bool loudUnread: unread > 0 && (mention || kind === "dm")
+                // rows render identically. A muted row is never loud on DM-ness
+                // alone — only a real @mention pierces the mute (Discord parity).
+                readonly property bool loudUnread: unread > 0 && (mention || (kind === "dm" && !muted))
                 // Not "open" while the Threads view covers the message pane — its
                 // indicator would read as a second highlight next to the threads cursor.
                 readonly property bool isOpen: id === Backend.currentChannelId && !Backend.threadsView
@@ -313,9 +317,10 @@ Rectangle {
 
                 Row {
                     anchors.fill: parent; anchors.leftMargin: sidebar.active ? 36 : 18
-                    // reserve the badge's footprint on the right so long names
-                    // elide before it instead of running underneath.
-                    anchors.rightMargin: 8 + (row.unread > 0 ? 38 : 0)
+                    // reserve the right-edge footprint so long names elide before
+                    // it: muted+unread = grey count + bell-slash (widest); else the
+                    // unread pill; else the lone bell-slash on a muted idle row.
+                    anchors.rightMargin: 8 + (row.unread > 0 ? (row.muted ? 46 : 38) : (row.muted ? 28 : 0))
                     spacing: 7
                     Item {
                         id: chIcon
@@ -349,9 +354,10 @@ Rectangle {
                         width: Math.min(implicitWidth, avail)
                         text: row.name; elide: Text.ElideRight
                         color: row.primary ? Theme.bg
+                             : row.muted ? Theme.dimmedFg
                              : (row.unread > 0 || row.isOpen || row.cursor) ? Theme.fg : Theme.dimmedFg
                         font.family: Theme.fontFamily; font.hintingPreference: Font.PreferNoHinting; font.pixelSize: 14
-                        font.weight: row.unread > 0 ? 500 : Theme.fontWeight
+                        font.weight: (row.unread > 0 && !row.muted) ? 500 : Theme.fontWeight
                     }
                     StatusEmoji {
                         id: chStatus
@@ -374,16 +380,27 @@ Rectangle {
                            font.family: Theme.fontFamily; font.hintingPreference: Font.PreferNoHinting
                            font.pixelSize: 12; font.weight: 500; font.features: ({ "tnum": 1 }) }
                 }
-                // Quiet unread (plain channel): bare muted count, no chip — keeps
-                // the row's two-level hierarchy for low-priority activity.
-                Text { 
+                // Quiet unread (plain channel, or a muted row): bare grey count.
+                // On muted rows it sits left of the bell-slash so you still see how
+                // many are waiting, just without the loud accent pill.
+                Text {
                     visible: row.unread > 0 && !row.loudUnread
-                    anchors.right: parent.right; anchors.rightMargin: 22
+                    anchors.right: parent.right; anchors.rightMargin: row.muted ? 38 : 22
                     anchors.verticalCenter: parent.verticalCenter
                     text: row.unread
                     color: row.primary ? Theme.bg : Theme.fg_muted
                     font.family: Theme.fontFamily; font.hintingPreference: Font.PreferNoHinting
                     font.pixelSize: 13; font.weight: 400
+                }
+                // Muted marker: same bell-slash the bar's DND uses, in red. Shown
+                // on any muted row that isn't piercing with a loud mention pill.
+                Icon {
+                    visible: row.muted && !row.loudUnread
+                    anchors.right: parent.right; anchors.rightMargin: 18
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 14; height: 14
+                    name: "bell-slash"
+                    color: Theme.red
                 }
 
                 HoverHandler { id: hov }

@@ -796,9 +796,11 @@ class DQS:
                 "topic": "", "unread": 0, "mention": False,
                 "avatar": avatar_url(rec.get("id"), rec.get("avatar")), "workspace": DM_WS,
                 "user": str(rec.get("id") or ""),
+                "muted": bool(dm.get("muted")),
             })
         for g in self.guilds:
             gid = g["guild_id"]
+            guild_muted = bool(g.get("muted"))
             for ch in g.get("channels", []):
                 if ch.get("type") not in TEXT_CHANNEL_TYPES:
                     continue
@@ -806,6 +808,8 @@ class DQS:
                     "id": ch["id"], "name": ch.get("name", ""), "kind": "channel",
                     "topic": ch.get("topic") or "", "unread": 0, "mention": False, "avatar": "", "workspace": gid,
                     "user": "",
+                    # a muted guild silences all its channels
+                    "muted": guild_muted or bool(ch.get("muted")),
                 })
         return {"type": "channels", "channels": entries, "subThreads": []}
 
@@ -1609,6 +1613,55 @@ class DQS:
             state["last_acked_message_id"] = str(mid)
             threading.Thread(target=self.discord.ack, args=(cid, str(mid)), daemon=True).start()
 
+    def _chan_muted(self, cid):
+        """True if this channel is muted (or its whole guild is) — suppresses
+        desktop notifications. Read defensively: channels with no override carry
+        no `muted` key. DM_WS distinguishes DMs (stored in self.dms)."""
+        ws = self.chan_guild.get(cid)
+        if ws is None:
+            return False
+        if ws == DM_WS:
+            return any(dm.get("id") == cid and dm.get("muted") for dm in self.dms)
+        for g in self.guilds:
+            if g.get("guild_id") == ws:
+                if g.get("muted"):
+                    return True
+                return any(ch.get("id") == cid and ch.get("muted")
+                           for ch in g.get("channels", []))
+        return False
+
+    def _set_local_mute(self, cid, ws, mute):
+        """Flip the muted flag on our local channel dict so the rebroadcast of
+        _channels_msg reflects the change without waiting for the gateway."""
+        if ws == DM_WS:
+            for dm in self.dms:
+                if dm.get("id") == cid:
+                    dm["muted"] = bool(mute); return
+        else:
+            for g in self.guilds:
+                if g.get("guild_id") == ws:
+                    for ch in g.get("channels", []):
+                        if ch.get("id") == cid:
+                            ch["muted"] = bool(mute); return
+
+    def do_mute(self, channel_id, mute, duration_s):
+        """Toggle Discord's server-side mute for a channel/DM (timed if duration_s
+        given), then rebroadcast the channel list. On success the rebroadcast
+        confirms the UI's optimistic flip; on failure it snaps the row back and a
+        toast explains why."""
+        ws = self.chan_guild.get(channel_id)
+        if ws == DM_WS:
+            ok = self.discord.mute_dm(mute, channel_id, duration_s)
+        elif ws:
+            ok = self.discord.mute_channel(mute, channel_id, ws, duration_s)
+        else:
+            ok = False
+        if ok:
+            self._set_local_mute(channel_id, ws, mute)
+        else:
+            self.broadcast({"type": "toast", "text": "Couldn't update mute"})
+        self.broadcast(self._channels_msg())
+
     def maybe_notify(self, m, cid, ws):
         """Fire a desktop notification for DMs and @mentions, unless it's the
         channel currently open or our own message. app-name 'endcord' so the
@@ -1619,6 +1672,9 @@ class DQS:
         mentioned = m.get("mention_everyone") or any(
             str(u.get("id")) == str(self.my_id) for u in (m.get("mentions") or []))
         if str(m.get("user_id")) == str(self.my_id):
+            return
+        # muted channel/guild → stay silent (mentions included, per Discord)
+        if self._chan_muted(cid):
             return
         # suppress only when the client window is focused AND viewing this channel
         if self.app_active and cid == self.active_ch:
@@ -1780,6 +1836,10 @@ class DQS:
                     if isinstance(patch, dict):
                         self.prefs.update(patch)
                         self._save_prefs()
+                elif t == "muteChannel" and ch:
+                    threading.Thread(target=self.do_mute,
+                                     args=(ch, bool(cmd.get("mute")), cmd.get("durationS")),
+                                     daemon=True).start()
                 elif t == "reactors" and ch and cmd.get("ts"):
                     threading.Thread(target=self.do_reactors,
                                      args=(ch, cmd["ts"], cmd.get("emojis") or []), daemon=True).start()

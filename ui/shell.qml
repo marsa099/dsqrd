@@ -118,6 +118,17 @@ FloatingWindow {
     // mode so routeKey (not the composer) gets the q/esc that dismiss it.
     function showCopilot() { copilot.show(); appRoot.forceActiveFocus() }
 
+    // `m`: mute/unmute the channel under the sidebar cursor (Discord only). Already
+    // muted → unmute directly (D5); else open the duration menu anchored to the row.
+    function muteSelected() {
+        if (!isDiscord) return
+        const it = sidebar.cursorItem
+        if (!it || !it.id) return
+        if (Backend.channelMuted(it.id)) { Backend.muteChannel(it.id, false, null); return }
+        muteMenu.muteTargetId = it.id
+        muteMenu.show()
+    }
+
     // When a staged attachment finishes uploading, drop into the composer so a
     // bare Enter sends it — the thread reply if a thread's open, else the channel.
     Connections {
@@ -244,6 +255,7 @@ FloatingWindow {
             // chats
             "enter":    { act: () => activate(), help: "Open selected", cat: "chats" },
             "/":        { act: () => palette.show(), help: "Jump palette", cat: "chats" },
+            "m":        { act: () => win.muteSelected(), help: "Mute channel", cat: "chats" },
             "b":        { act: () => { if (win.isDiscord) win.toggleSidebar(); else browse.show() },
                           help: () => win.isDiscord ? "Toggle sidebar" : "Browse channels", cat: "chats" },
             "s":        { act: () => sidebar.toggleStarCurrent(), help: "Star / unstar channel", cat: "chats" },
@@ -910,27 +922,38 @@ FloatingWindow {
                 onOpenChanged: if (!open) win.backToNormal()
             }
 
-            // Transient status toast (e.g. "Copied message"), fired by Backend.toast().
-            Rectangle {
+            // Mute-duration menu (Discord). `m` opens it anchored to the sidebar
+            // cursor row; picking a duration sends muteChannel. No initials chips.
+            Dropdown {
+                id: muteMenu
+                z: 105
+                property string muteTargetId: ""
+                anchorItem: sidebar.cursorItem
+                grabsKeys: true
+                showChips: false
+                scrimOpacity: 0.28
+                panelWidth: 190
+                model: [
+                    { id: 900,   label: "15 minutes" },
+                    { id: 1800,  label: "30 minutes" },
+                    { id: 3600,  label: "1 hour" },
+                    { id: 28800, label: "8 hours" }
+                ]
+                onActivated: secs => Backend.muteChannel(muteMenu.muteTargetId, true, secs)
+                onClosed: win.backToNormal()
+            }
+
+            // Transient status toast (e.g. "Copied message", "muted #chan"), fired
+            // by Backend.toast(). The family FeedbackPill (design system) — same
+            // component mlqs uses, so notifications match across the apps.
+            FeedbackPill {
                 id: toast
                 z: 200
-                property string message: ""
-                visible: opacity > 0
-                opacity: 0
                 anchors.horizontalCenter: parent.horizontalCenter
                 anchors.bottom: parent.bottom; anchors.bottomMargin: 30
-                width: toastLbl.implicitWidth + 28; height: 32; radius: 8
-                color: Theme.surface; border.width: 1; border.color: Theme.hairline
-                Behavior on opacity { NumberAnimation { duration: 140 } }
-                Text {
-                    id: toastLbl; anchors.centerIn: parent
-                    text: toast.message; color: Theme.fg
-                    font.family: Theme.fontFamily; font.hintingPreference: Font.PreferNoHinting; font.pixelSize: 13
-                }
-                Timer { id: toastTimer; interval: 1400; onTriggered: toast.opacity = 0 }
                 Connections {
                     target: Backend
-                    function onToast(message) { toast.message = message; toast.opacity = 1; toastTimer.restart() }
+                    function onToast(message) { toast.show(message) }
                 }
             }
 

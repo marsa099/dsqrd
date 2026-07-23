@@ -4,6 +4,7 @@
 # the Free Software Foundation, version 3.
 
 import base64
+import datetime
 import http.client
 import logging
 import os
@@ -1004,8 +1005,17 @@ class Discord():
         return False
 
 
-    def mute_channel(self, mute, channel_id, guild_id):
-        """Mute/unmute channel or category"""
+    @staticmethod
+    def _mute_config(duration_s):
+        """Discord mute_config. A duration → a server-side expiry (Discord clears
+        the mute itself at end_time); None → indefinite (until manually unmuted)."""
+        if not duration_s:
+            return {"end_time": None, "selected_time_window": -1}
+        end = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=duration_s)
+        return {"end_time": end.isoformat(), "selected_time_window": int(duration_s)}
+
+    def mute_channel(self, mute, channel_id, guild_id, duration_s=None):
+        """Mute/unmute channel or category. duration_s → timed mute."""
         channel_id = str(channel_id)
         guild_id = str(guild_id)
 
@@ -1015,10 +1025,7 @@ class Discord():
             },
         }
         if mute:
-            channel_overrides[channel_id]["mute_config"] = {
-                "end_time": None,
-                "selected_time_window": -1,
-            }
+            channel_overrides[channel_id]["mute_config"] = self._mute_config(duration_s)
         message_dict = {
             "guilds": {
                 guild_id: {
@@ -1038,8 +1045,8 @@ class Discord():
         return False
 
 
-    def mute_dm(self, mute, dm_id):
-        """Mute/unmute DM"""
+    def mute_dm(self, mute, dm_id, duration_s=None):
+        """Mute/unmute DM. duration_s → timed mute."""
         dm_id = str(dm_id)
 
         message_dict = {
@@ -1050,10 +1057,7 @@ class Discord():
             },
         }
         if mute:
-            message_dict["channel_overrides"][dm_id]["mute_config"] = {
-                "end_time": None,
-                "selected_time_window": -1,
-            }
+            message_dict["channel_overrides"][dm_id]["mute_config"] = self._mute_config(duration_s)
 
         url = "/api/v9/users/@me/guilds/%40me/settings"
         message_data = json.dumps(message_dict)
