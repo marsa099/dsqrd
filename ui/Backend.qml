@@ -750,10 +750,14 @@ Item {
     // xdg-desktop-portal-gnome — only cold starts ever worked. Spawning
     // xdg-open ourselves uses the plain mime-handler path, which is reliable.
     function openExternally(url) {
-        // Diagnostic wrapper (temporary): record the spawn, xdg-open's exit
-        // code, and its stderr in /tmp/dsqrd-open.log — opens from the real UI
-        // have been failing silently while every out-of-process replication
-        // works, so capture the ground truth at the exact failing call site.
+        // The sh wrapper with redirected output is load-bearing, not just
+        // logging: a bare execDetached(["xdg-open", url]) silently dropped the
+        // handoff to an already-running browser (every warm open failed from
+        // the real UI while identical spawns from any other process worked) —
+        // the detached spawn context breaks something in the chromium remote
+        // handoff. Through a shell with stdio redirected to a file it is
+        // reliable, and the log doubles as a debug trail for the next time a
+        // link "doesn't open".
         Quickshell.execDetached(["sh", "-c",
             "{ echo \"$(date +%T.%3N) spawn url=$1\"; xdg-open \"$1\"; "
           + "echo \"$(date +%T.%3N) exit=$?\"; } >>/tmp/dsqrd-open.log 2>&1",
