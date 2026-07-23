@@ -201,6 +201,19 @@ def emoji_url(emoji_id, animated=False):
 
 
 EMOJI_JSON = os.path.join(_data_dir(), "emoji-dsqrd.json")
+PREFS_JSON = os.path.join(_data_dir(), "prefs-dsqrd.json")
+
+
+def _load_prefs():
+    """UI preferences persisted across restarts (sidebar collapsed, recent
+    channels, last-active channel). Frequent update-restarts otherwise reset
+    them every time. Best-effort: a missing/corrupt file just yields {}."""
+    try:
+        with open(PREFS_JSON) as f:
+            p = json.load(f)
+            return p if isinstance(p, dict) else {}
+    except Exception:
+        return {}
 
 
 IMG_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".apng")
@@ -635,6 +648,18 @@ class DQS:
         self.issues_event = None   # latest issueTracker event, replayed to new clients
         self._issues_etag = None
         self._last_issues_check = 0.0
+        self.prefs = _load_prefs()   # persisted UI prefs, replayed on bootstrap
+        self._prefs_lock = threading.Lock()
+
+    def _save_prefs(self):
+        with self._prefs_lock:
+            try:
+                tmp = PREFS_JSON + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump(self.prefs, f)
+                os.replace(tmp, PREFS_JSON)
+            except Exception:
+                pass
 
     # ---- wire helpers ----
     def write(self, conn, obj):
@@ -785,6 +810,9 @@ class DQS:
         return {"type": "channels", "channels": entries, "subThreads": []}
 
     def send_bootstrap(self, conn):
+        # persisted UI prefs first, so the client restores sidebar/recents
+        # before it renders channels
+        self.write(conn, {"type": "prefs", "prefs": self.prefs})
         if self.update_event:   # replay update-available state to a (re)connecting client
             self.write(conn, self.update_event)
         if self.issues_event:   # replay upstream-issue status to a (re)connecting client
@@ -1720,6 +1748,13 @@ class DQS:
                     threading.Thread(target=self.do_compress_upload, args=(ch, cmd.get("thread"), cmd.get("path"), ev), daemon=True).start()
                 elif t == "dropAttach" and ch:
                     self.pending_attach.pop(ch, None)
+                elif t == "savePrefs":
+                    # UI persists a prefs patch (sidebar/recents/last channel);
+                    # merge + write so it survives the next update-restart
+                    patch = cmd.get("prefs")
+                    if isinstance(patch, dict):
+                        self.prefs.update(patch)
+                        self._save_prefs()
                 elif t == "reactors" and ch and cmd.get("ts"):
                     threading.Thread(target=self.do_reactors,
                                      args=(ch, cmd["ts"], cmd.get("emojis") or []), daemon=True).start()
@@ -1856,7 +1891,8 @@ class DQS:
 
     def _emit_update(self, latest):
         self.update_event = {"type": "updateAvailable",
-                             "current": GIT_REV[:7], "latest": latest[:7]}
+                             "current": GIT_REV[:7], "latest": latest[:7],
+                             "changelog": self._fetch_changelog(GIT_REV, latest)}
         self.broadcast(self.update_event)
 
     def _check_issues_once(self):
@@ -1884,6 +1920,21 @@ class DQS:
                 pass
         except Exception:
             pass
+
+    def _fetch_changelog(self, current, latest):
+        """Commit subjects between the running build and latest, newest-first,
+        via the GitHub compare API — so the UI can show what's about to land.
+        Best-effort: on any failure return [] (the UI just skips the changelog)."""
+        try:
+            api = f"https://api.github.com/repos/daphen/dsqrd/compare/{current}...{latest}"
+            headers = {"User-Agent": "dsqrd", "Accept": "application/vnd.github+json"}
+            with urllib.request.urlopen(urllib.request.Request(api, headers=headers), timeout=15) as r:
+                data = json.loads(r.read().decode())
+            subjects = [c["commit"]["message"].split("\n", 1)[0]
+                        for c in data.get("commits", []) if c.get("commit")]
+            return list(reversed(subjects))[:30]
+        except Exception:
+            return []
 
     def check_updates(self):
         """Tell the client when a newer build exists. Detect-only — applying is the

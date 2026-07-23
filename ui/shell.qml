@@ -60,6 +60,13 @@ FloatingWindow {
         sidebarPeeking = false
         // don't leave the keyboard on a now-zero-width pane
         if (sidebarHidden && focusedPanel === "sidebar") focusPanel("messages")
+        Backend.savePrefs({ sidebarCollapsed: sidebarCollapsed })   // #4: survive restarts
+    }
+    // #4: apply the persisted sidebar preference once the daemon replays prefs
+    // (dsqrd only; slqs sends none, so it stays at the default).
+    Connections {
+        target: Backend
+        function onPrefsLoaded() { win.sidebarCollapsed = Backend.prefs.sidebarCollapsed === true }
     }
 
     function focusPanel(name) {
@@ -276,7 +283,11 @@ FloatingWindow {
             "?":        { act: () => help.show(), help: "This help", cat: "view" },
             "!":        { act: () => issuesPanel.show(), help: "Upstream issues", cat: "view" },
             "ctrl+shift+r": { act: () => Backend.checkForUpdates(), help: "Check for updates", cat: "view" },
-            "U":        { act: () => { if (Backend.updateAvailable) Backend.applyUpdate(); else win.uploadClipboardPath() }, help: "Upload file path from clipboard", cat: "chats" },
+            "U":        { act: () => {
+                              if (Backend.updateAvailable && Backend.updateChangelog.length > 0) changelog.show()
+                              else if (Backend.updateAvailable) Backend.applyUpdate()
+                              else win.uploadClipboardPath()
+                          }, help: "Upload file path from clipboard", cat: "chats" },
             "esc":      { act: () => backToNormal(), help: "Back to normal", cat: "view" },
         },
         "thread": {
@@ -391,6 +402,14 @@ FloatingWindow {
             else if (e.key === Qt.Key_K || e.key === Qt.Key_Up) p.move(-1)
             else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_O || e.key === Qt.Key_L) p.openCurrent()
             else if (e.text >= "1" && e.text <= "9" && e.text.length === 1) p.openAt(parseInt(e.text) - 1)
+            e.accepted = true; return
+        }
+        // Changelog modal (#5): ↵ applies the update, j/k scroll, esc/q close.
+        if (changelog.open) {
+            if (e.key === Qt.Key_Escape || e.key === Qt.Key_Q) changelog.close()
+            else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter) { changelog.close(); Backend.applyUpdate() }
+            else if (e.key === Qt.Key_J) changelog.scrollStep(48)
+            else if (e.key === Qt.Key_K) changelog.scrollStep(-48)
             e.accepted = true; return
         }
         // Cheat sheet: driven from here (the shell keeps focus; handing it to the
@@ -877,6 +896,17 @@ FloatingWindow {
             LinkPicker {
                 id: linkPicker
                 z: 105
+                onOpenChanged: if (!open) win.backToNormal()
+            }
+
+            // "What's new" before applying an update (#5). Shell-routed; opened
+            // from the U keybind when the daemon supplied a changelog.
+            ChangelogModal {
+                id: changelog
+                z: 104
+                entries: Backend.updateChangelog
+                fromRev: Backend.updateCurrent
+                toRev: Backend.updateLatest
                 onOpenChanged: if (!open) win.backToNormal()
             }
 
