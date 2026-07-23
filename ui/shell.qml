@@ -389,8 +389,7 @@ FloatingWindow {
     function routeKey(e) {
         const ctrl = e.modifiers & Qt.ControlModifier
         // Copilot takeover: q / esc close it, l flips Swedish/English, f opens
-        // the feedback field (typed from here, like the cheat sheet's search);
-        // swallow everything else so the app behind stays frozen.
+        // the feedback field; swallow everything else so the app stays frozen.
         if (copilot.open) {
             if (copilot.feedbackMode) {
                 if (e.key === Qt.Key_Escape) copilot.cancelFeedback()
@@ -404,9 +403,8 @@ FloatingWindow {
             }
             e.accepted = true; return
         }
-        // Issue tracker / link chooser takeovers: identical list interface
-        // (move / openAt / openCurrent / close), driven from here like the
-        // other overlays; swallow everything else.
+        // Issue tracker / link chooser takeovers keep their shell-routed list
+        // controls. Shared QsLib modals instead own focus and keys themselves.
         if (issuesPanel.open || linkPicker.open) {
             const p = issuesPanel.open ? issuesPanel : linkPicker
             if (e.key === Qt.Key_Escape || e.key === Qt.Key_Q) p.close()
@@ -416,29 +414,8 @@ FloatingWindow {
             else if (e.text >= "1" && e.text <= "9" && e.text.length === 1) p.openAt(parseInt(e.text) - 1)
             e.accepted = true; return
         }
-        // Changelog modal (#5): ↵ applies the update, j/k scroll, esc/q close.
-        if (changelog.open) {
-            if (e.key === Qt.Key_Escape || e.key === Qt.Key_Q) changelog.close()
-            else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter) { changelog.close(); Backend.applyUpdate() }
-            else if (e.key === Qt.Key_J) changelog.scrollStep(48)
-            else if (e.key === Qt.Key_K) changelog.scrollStep(-48)
-            e.accepted = true; return
-        }
-        // Cheat sheet: driven from here (the shell keeps focus; handing it to the
-        // overlay proved unreliable). esc closes / clears; / filters; typing edits.
-        if (help.open) {
-            if (e.key === Qt.Key_Escape) {
-                if (help.searching || help.query) help.resetSearch(); else help.close()
-            } else if (e.key === Qt.Key_Slash && !help.searching) {
-                help.searching = true
-            } else if (!help.searching && (e.key === Qt.Key_Q || e.text === "?")) {
-                help.close()
-            } else if (help.searching) {
-                if (e.key === Qt.Key_Backspace) help.query = help.query.slice(0, -1)
-                else if (e.text && e.text.length === 1 && e.text.charCodeAt(0) >= 0x20) help.query += e.text
-            }
-            e.accepted = true; return
-        }
+        // Changelog, cheat sheet, and confirmations use the QsLib Modal scaffold;
+        // while one is open it owns focus and the shell never sees the event.
         const id = keyId(e, ctrl)
         if (!id) return
         // a live voice recording claims enter (send) and esc (cancel) before anything else
@@ -775,19 +752,19 @@ FloatingWindow {
                 }
                 // Persistent help affordance — stays pinned in the corner even
                 // when the rest of the hints collapse on a narrow window.
-                StatusCap {
+                Row {
                     id: helpBadge
                     visible: !Backend.updateAvailable
-                    text: "?"
                     anchors.right: parent.right; anchors.rightMargin: 14
                     anchors.verticalCenter: parent.verticalCenter
+                    spacing: 6
+                    StatusCap { text: "?" }
+                    CapLabel { text: "cheatsheet" }
                     HoverHandler { cursorShape: Qt.PointingHandCursor }
                     TapHandler { onTapped: help.show() }
                 }
-                // Quiet tracker for feature requests filed on daphen's upstream —
-                // deliberately low-key (fg_muted, no chip). Yields the corner to
-                // the orange update message when one is pending. Click (or `!`)
-                // opens the issues takeover.
+                // Quiet tracker for feature requests filed on daphen's upstream.
+                // Click it (or press `!`) to open the issues takeover.
                 Text {
                     id: issueStatus
                     visible: !Backend.updateAvailable && text !== ""
@@ -798,6 +775,19 @@ FloatingWindow {
                     font.family: Theme.fontFamily; font.hintingPreference: Font.PreferNoHinting; font.pixelSize: 12
                     HoverHandler { cursorShape: Qt.PointingHandCursor }
                     TapHandler { onTapped: issuesPanel.show() }
+                }
+                Row {
+                    id: hintRow
+                    visible: !Backend.updateAvailable
+                    // Keep upstream's slim jump hint when it fits; opacity avoids
+                    // feeding the available-width calculation back into itself.
+                    opacity: (statusbar.width - leftStatus.width - implicitWidth
+                              - issueStatus.implicitWidth - helpBadge.width - 82) >= 0 ? 1 : 0
+                    anchors.right: issueStatus.left; anchors.rightMargin: 12
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 6
+                    StatusCap { text: "ctrl k" }
+                    CapLabel { text: "jump" }
                 }
                 Text {
                     visible: Backend.updateAvailable
@@ -887,7 +877,7 @@ FloatingWindow {
                 id: help
                 z: 103
                 keymaps: win.keymaps
-                onOpenChanged: if (!open) win.backToNormal()
+                onClosed: win.backToNormal()
             }
 
             // Microsoft Copilot catch-up takeover (q/esc close, driven by routeKey).
@@ -919,6 +909,7 @@ FloatingWindow {
                 entries: Backend.updateChangelog
                 fromRev: Backend.updateCurrent
                 toRev: Backend.updateLatest
+                onAccepted: { close(); Backend.applyUpdate() }
                 onOpenChanged: if (!open) win.backToNormal()
             }
 

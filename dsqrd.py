@@ -2007,17 +2007,30 @@ class DQS:
             pass
 
     def _fetch_changelog(self, current, latest):
-        """Commit subjects between the running build and latest, newest-first,
-        via the GitHub compare API — so the UI can show what's about to land.
-        Best-effort: on any failure return [] (the UI just skips the changelog)."""
+        """"What's new" entries between the running build and latest, via the
+        GitHub compare API. Keeps each commit's `Changelog:` trailer lines
+        (user-facing summaries); a range with none (pre-convention) falls back
+        to commit subjects. Newest-first, cap 30. Best-effort: [] on failure."""
         try:
             api = f"https://api.github.com/repos/daphen/dsqrd/compare/{current}...{latest}"
             headers = {"User-Agent": "dsqrd", "Accept": "application/vnd.github+json"}
             with urllib.request.urlopen(urllib.request.Request(api, headers=headers), timeout=15) as r:
                 data = json.loads(r.read().decode())
-            subjects = [c["commit"]["message"].split("\n", 1)[0]
-                        for c in data.get("commits", []) if c.get("commit")]
-            return list(reversed(subjects))[:30]
+            entries, subjects = [], []
+            for c in data.get("commits", []):
+                msg = (c.get("commit") or {}).get("message", "")
+                if not msg:
+                    continue
+                subjects.append(msg.split("\n", 1)[0])
+                for line in msg.split("\n"):
+                    line = line.strip()
+                    if line.startswith("Changelog:"):
+                        e = line[len("Changelog:"):].strip()
+                        if e:
+                            entries.append(e)
+            if not entries:
+                entries = subjects   # pre-convention range: fall back to subjects
+            return list(reversed(entries))[:30]
         except Exception:
             return []
 

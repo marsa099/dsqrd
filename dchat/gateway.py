@@ -4,6 +4,7 @@
 # the Free Software Foundation, version 3.
 
 import base64
+import datetime
 import gc
 import http.client
 import logging
@@ -46,6 +47,21 @@ QOS_PAYLOAD = {"ver": 26, "active": True, "reason": "foregrounded"}
 inflator = None
 logger = logging.getLogger(__name__)
 status_unpacker = struct.Struct("!H")
+
+
+def mute_active(entry):
+    """Whether entry's mute is currently in effect. Discord sends muted=True with a
+    mute_config.end_time for timed mutes but never flips muted back once end_time
+    passes, so an expired timed mute would otherwise arrive as muted on reconnect."""
+    if not entry.get("muted"):
+        return False
+    end = (entry.get("mute_config") or {}).get("end_time")
+    if not end:
+        return True
+    try:
+        return datetime.datetime.fromisoformat(end.replace("Z", "+00:00")) > datetime.datetime.now(datetime.timezone.utc)
+    except (ValueError, TypeError, AttributeError):
+        return True
 
 
 def zlib_decompress(data):
@@ -467,7 +483,7 @@ class Gateway():
                 hidden = False
             self.guilds[guild_num]["channels"][channel_num].update({
                 "message_notifications": channel["message_notifications"],
-                "muted": channel["muted"],
+                "muted": mute_active(channel),
                 "hidden": hidden,
                 "collapsed": channel.get("collapsed", False),   # spacebar_fix - get
             })
@@ -902,7 +918,7 @@ class Gateway():
                                 "suppress_everyone": guild["suppress_everyone"],
                                 "suppress_roles": guild["suppress_roles"],
                                 "message_notifications": guild["message_notifications"],
-                                "muted": guild["muted"],
+                                "muted": mute_active(guild),
                             })
                             guild_flags = int(guild.get("flags", 0))
                             # opt_in_channels means: show all guild channels - when guild is joined
@@ -918,7 +934,7 @@ class Gateway():
                                     continue
                                 self.dms[dm_num].update({
                                     "message_notifications": dm["message_notifications"],
-                                    "muted": dm["muted"],
+                                    "muted": mute_active(dm),
                                 })
                     self.process_hidden_channels()
                     self.guilds_changed = True
@@ -1508,7 +1524,7 @@ class Gateway():
                             "suppress_everyone": data["suppress_everyone"],
                             "suppress_roles": data["suppress_roles"],
                             "message_notifications": data["message_notifications"],
-                            "muted": data["muted"],
+                            "muted": mute_active(data),
                             "opt_in_channels": opt_in_channels,
                         })
                         # reset all to defaults
@@ -1535,7 +1551,7 @@ class Gateway():
                                 continue
                             self.dms[dm_num].update({
                                 "message_notifications": dm["message_notifications"],
-                                "muted": dm["muted"],
+                                "muted": mute_active(dm),
                             })
                     self.guilds_changed = True
 
