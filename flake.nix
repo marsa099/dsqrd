@@ -56,7 +56,11 @@
           exec 9>"$XDG_RUNTIME_DIR/dsqrd-launch.lock"
           flock 9
           alive=""
-          for pid in $(pgrep -f 'dsqrd\.py' 2>/dev/null); do
+          # match the installed daemon path, not bare 'dsqrd.py' — any process
+          # whose argv merely mentions the filename (an editor, a Claude session
+          # prompt) would otherwise read as a live daemon and the real one never
+          # gets started, leaving the UI on a dead socket
+          for pid in $(pgrep -f 'share/dsqrd/dsqrd\.py' 2>/dev/null); do
             # a zombie (unreaped child) matches pgrep but serves nothing
             case "$(ps -o stat= -p "$pid" 2>/dev/null)" in Z*|"") ;; *) alive=1 ;; esac
           done
