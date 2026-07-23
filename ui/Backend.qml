@@ -617,6 +617,7 @@ Item {
         loadingOlder = false
         _noMore[id] = false
         messagesModel.clear()        // slkd replies `recent` → loadRecent populates
+        delete _catchupStart[id]      // the incoming snapshot carries a fresh read boundary
         safeWrite(JSON.stringify({ type: "recent", channel: id }) + "\n")
         applyUnread(id, 0)   // clear locally (and re-flow sections)
         sendFocus()          // slkd suppresses notifications for the channel we're on
@@ -660,28 +661,34 @@ Item {
         for (let i = threadModel.count - 1; i >= 0; i--) { const m = threadModel.get(i); if (m.mine) return m }
         return null
     }
-    // Plain-text transcript of everything posted in the open channel since my
-    // last message there — the source the Microsoft Copilot catch-up summarizes.
-    // Returns { text, count }; count 0 means nothing new since I last spoke.
+    // Read boundary captured by the daemon before opening a channel marks it
+    // read. Copilot always gets the last 50 rows as context, but only summarizes
+    // rows from this message onward.
+    property var _catchupStart: ({})  // channel -> first unread ts; "" = caught up
     function catchupSince() {
         const arr = _store[currentChannelId] || []
+        const window = arr.slice(-50)
         const fmt = (m) => {
             let t = plainText(m.text || "").trim()
             if (!t && m.imagesJson && m.imagesJson !== "[]") t = "[attachment]"
             return (m.time || "") + " " + (m.author || "?") + ": " + t
         }
-        let lastMine = -1
-        for (let i = arr.length - 1; i >= 0; i--) if (arr[i].mine) { lastMine = i; break }
-        const since = arr.slice(lastMine + 1).map(fmt)
-        // Enough new since I last spoke → catch me up on exactly that. Otherwise
-        // there's little/nothing new (I just posted), so widen to the last 50
-        // messages: a recap of the recent conversation beats summarizing a lone
-        // "lol" — or replying "1 message" and asking me to paste a log.
-        const rows = since.length >= 3 ? since : arr.slice(-50).map(fmt)
-        // sinceCount = raw "new since my last message" count (the prefetch
-        // threshold); lastTs keys the summary cache to the channel's newest
-        // message, so any new arrival invalidates it.
-        return { text: rows.join("\n"), count: rows.length, sinceCount: since.length,
+        const boundary = _catchupStart[currentChannelId]
+        let start = -1
+        if (boundary === undefined) {
+            // Compatibility with an older daemon during a rolling restart.
+            for (let i = window.length - 1; i >= 0; i--)
+                if (window[i].mine) { start = i + 1; break }
+            if (start < 0 && window.length > 0) start = 0
+        } else if (boundary !== "") {
+            start = window.findIndex(m => String(m.ts || "") === String(boundary))
+            if (start < 0) start = 0 // read boundary predates the 50-row window
+        }
+        const count = start < 0 ? 0 : window.length - start
+        const rows = window.map(fmt)
+        if (count > 0)
+            rows.splice(start, 0, "--- LAST READ — SUMMARIZE MESSAGES BELOW ---")
+        return { text: rows.join("\n"), count: count, sinceCount: count,
                  lastTs: arr.length > 0 ? String(arr[arr.length - 1].ts || "") : "" }
     }
     // Date grouping for the message list: a stable YYYYMMDD key per message, and
@@ -710,8 +717,10 @@ Item {
         property string channel: ""
         onTriggered: if (channel !== "") safeWrite(JSON.stringify({ type: "recent", channel: channel }) + "\n")
     }
-    function loadRecent(id, msgs, reset, isFinal, jump) {
+    function loadRecent(id, msgs, reset, isFinal, jump, catchupStart) {
         msgs = msgs || []
+        if (reset && _catchupStart[id] === undefined && catchupStart !== undefined)
+            _catchupStart[id] = String(catchupStart || "")
         if (reset && isFinal && msgs.length === 0 && !jump
                 && _store[id] && _store[id].length > 0) {
             const tries = _recentRetry[id] || 0
@@ -1190,7 +1199,7 @@ Item {
                 viewingNonMember = (e.joined === false)
                 if (viewingNonMember) { _nonMemberChannel = e.channel; _nonMemberName = e.channelName || "" }
             }
-            loadRecent(e.channel, e.msgs, e.reset, e.final, e.jump)
+            loadRecent(e.channel, e.msgs, e.reset, e.final, e.jump, e.catchupStart)
         }
         else if (e.type === "jumpFailed") {
             // Couldn't fetch (private/no access) — open the original link instead.
@@ -1538,6 +1547,11 @@ Item {
         if (!_store[id]) _store[id] = []
         const arr = _store[id]
         msg.grouped = arr.length > 0 && _grp(arr[arr.length - 1], msg)
+        // The channel can stay selected while the window is unfocused. Those
+        // arrivals were not read, so establish a boundary without requiring a
+        // channel switch/refetch.
+        if (id === currentChannelId && !appActive && !msg.mine && _catchupStart[id] === "")
+            _catchupStart[id] = String(msg.ts || "")
         arr.push(msg)
         if (id === currentChannelId) {
             messagesModel.append(msg)

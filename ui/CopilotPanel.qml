@@ -5,7 +5,7 @@ import "."
 import QsLib
 
 // Microsoft Copilot catch-up overlay. Fired from the composer's Copilot button:
-// it summarizes everything posted in the open channel since my last message and
+// it summarizes everything posted in the open channel since I last read it and
 // shows it as a single takeover "message" from Microsoft Copilot — the only
 // thing on screen until dismissed. shell.qml's routeKey owns dismissal (q / esc),
 // exactly like the `?` cheat sheet, so focus handling stays in one place.
@@ -44,8 +44,10 @@ Item {
     // ("however short", "never ask me to paste") stop the model from punting on
     // a one-line log with "I don't see a chat log, paste it".
     readonly property string _instr:
-        "Catch me up on a Discord channel. Everything between the markers below is "
-      + "a chat log of the recent conversation in the channel. Summarize it as "
+        "Catch me up on a Discord channel. Everything between the CHAT LOG markers below is "
+      + "the last 50 messages for context. Summarize ONLY messages below the "
+      + "'LAST READ — SUMMARIZE MESSAGES BELOW' line; use earlier messages only "
+      + "to understand references and never include them as catch-up items. Summarize the unread part as "
       + "markdown bullets: each bullet starts with '- ' and is ONE short line, "
       + "with a blank line between bullets — max 5 bullets, fewer when the log "
       + "is small; no filler, no preamble. Be strictly factual: state only what "
@@ -180,8 +182,8 @@ Item {
     }
 
     // Speculative prefetch — the debounce below arms this on channel switch and
-    // on the window regaining focus. Only spends a prompt when ≥5 messages
-    // arrived since my last one and neither the cache nor a running job already
+    // on the window regaining focus. Only spends a prompt when ≥5 unread messages
+    // arrived since the last read boundary and neither the cache nor a running job already
     // covers them; the result lands in _cache so pressing `c` is instant.
     function maybePrefetch() {
         if (open || proc.running) return

@@ -838,6 +838,25 @@ class DQS:
         except Exception:
             pass
         msgs = self.discord.get_messages(channel_id, num=50) or []
+        # Snapshot the server read boundary before the UI acknowledges this open.
+        # Copilot receives all 50 rows for context, but summarizes only rows after
+        # this marker (rather than guessing from the user's last sent message).
+        read_states = self.gateway.get_read_state() or {}
+        while True:
+            ack = self.gateway.get_message_ack()
+            if not ack:
+                break
+            ack_ch = str(ack.get("channel_id") or "")
+            if ack_ch:
+                read_states.setdefault(ack_ch, {})["last_acked_message_id"] = str(
+                    ack.get("message_id") or "")
+        state = read_states.get(channel_id, {})
+        last_read = str(state.get("last_acked_message_id") or "")
+        catchup_start = ""
+        if last_read:
+            unread = [m for m in msgs if int(m.get("id") or 0) > int(last_read)]
+            if unread:
+                catchup_start = str(min(unread, key=lambda m: int(m.get("id") or 0)).get("id") or "")
         for m in msgs:
             self.learn_participant(channel_id, m)
         out = [map_msg(m) for m in msgs]
@@ -845,13 +864,15 @@ class DQS:
             self.queue_gifv(channel_id, mm)
         out.reverse()  # API returns newest-first; client wants chronological
         if not out:
-            self.write(conn, {"type": "recent", "channel": channel_id, "msgs": [], "reset": True, "final": True})
+            self.write(conn, {"type": "recent", "channel": channel_id, "msgs": [], "reset": True,
+                              "final": True, "catchupStart": ""})
             return
         chunk = 20
         for i in range(0, len(out), chunk):
             payload = {"type": "recent", "channel": channel_id, "msgs": out[i:i + chunk]}
             if i == 0:
                 payload["reset"] = True
+                payload["catchupStart"] = catchup_start
             if i + chunk >= len(out):
                 payload["final"] = True
             self.write(conn, payload)
@@ -1584,6 +1605,8 @@ class DQS:
             return
         mid = m.get("id")
         if mid:
+            state = (self.gateway.get_read_state() or {}).setdefault(cid, {})
+            state["last_acked_message_id"] = str(mid)
             threading.Thread(target=self.discord.ack, args=(cid, str(mid)), daemon=True).start()
 
     def maybe_notify(self, m, cid, ws):
@@ -1710,6 +1733,8 @@ class DQS:
                     fn = self.discord.remove_reaction if cmd.get("remove") else self.discord.send_reaction
                     threading.Thread(target=self._call, args=("react", fn, ch, cmd["ts"], emoji), daemon=True).start()
                 elif t == "markread" and ch and cmd.get("before"):
+                    state = (self.gateway.get_read_state() or {}).setdefault(ch, {})
+                    state["last_acked_message_id"] = str(cmd["before"])
                     threading.Thread(target=self._call, args=("markread", self.discord.ack, ch, cmd["before"]), daemon=True).start()
                 elif t == "typing" and ch:
                     threading.Thread(target=self.discord.send_typing, args=(ch,), daemon=True).start()
