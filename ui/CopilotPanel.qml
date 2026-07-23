@@ -75,9 +75,9 @@ Item {
     // ── feedback → standing rules ─────────────────────────────────────────
     // `f` opens an inline feedback field (typed via shell.routeKey, the same
     // keep-focus-in-the-shell pattern as the cheat sheet's search). Submitted
-    // feedback goes to opus 4.8, which curates a standing-rules list stored in
+    // feedback goes to pi, which curates a standing-rules list stored in
     // ~/.local/share/dsqrd/copilot-feedback.md; the list is injected into every
-    // future summary prompt. Opus decides whether the feedback warrants a rule
+    // future summary prompt. Pi decides whether the feedback warrants a rule
     // at all, so one-off gripes don't pollute the list.
     property bool feedbackMode: false
     property string feedbackText: ""
@@ -116,8 +116,10 @@ Item {
         property string b64: ""
         command: ["sh", "-c",
             "d=\"$HOME/.local/share/dsqrd\"; mkdir -p \"$d\"; "
-          + "printf %s '" + b64 + "' | base64 -d | claude -p --model claude-opus-4-8 "
-          + "> \"$d/copilot-feedback.md.tmp\" 2>/tmp/dsqrd-copilot-fb.err "
+          + "printf %s '" + b64 + "' | base64 -d | PI_SKIP_VERSION_CHECK=1 pi -p "
+          + "--no-session --no-tools --no-extensions --no-skills --no-prompt-templates "
+          + "--no-context-files --thinking off > \"$d/copilot-feedback.md.tmp\" "
+          + "2>/tmp/dsqrd-copilot-fb.err "
           + "&& [ -s \"$d/copilot-feedback.md.tmp\" ] "
           + "&& mv \"$d/copilot-feedback.md.tmp\" \"$d/copilot-feedback.md\""]
         onExited: (code, status) => {
@@ -216,7 +218,7 @@ Item {
         proc.jobTs = ts
         proc.acc = ""
         // base64 the prompt so the transcript (åäö, emoji, quotes) survives the
-        // shell untouched, then decode straight into `claude`. Qt.btoa already
+        // shell untouched, then decode straight into `pi`. Qt.btoa already
         // UTF-8-encodes the string, so pass it raw — wrapping it in
         // unescape(encodeURIComponent()) would double-encode and mojibake it.
         proc.b64 = Qt.btoa(_instr
@@ -240,25 +242,21 @@ Item {
         property string jobChannel: ""
         property string jobTs: ""
         property string acc: ""
-        // stream-json + partial messages so the summary renders as it's
-        // generated instead of after Opus finishes (-p requires --verbose for
-        // stream-json output).
-        command: ["sh", "-c", "printf %s '" + b64 + "' | base64 -d | claude -p --model claude-opus-4-8 --output-format stream-json --include-partial-messages --verbose 2>/tmp/dsqrd-copilot.err"]
+        // pi's JSON event mode exposes text deltas, preserving the streaming UI
+        // while using pi's configured provider/model. This one-shot has no tools,
+        // session, extensions, skills, project context, or startup update check.
+        command: ["sh", "-c", "printf %s '" + b64 + "' | base64 -d | PI_SKIP_VERSION_CHECK=1 pi --mode json --no-session --no-tools --no-extensions --no-skills --no-prompt-templates --no-context-files --thinking off 2>/tmp/dsqrd-copilot.err"]
         stdout: SplitParser {
             onRead: (line) => {
                 let ev
                 try { ev = JSON.parse(line) } catch (x) { return }
-                if (ev.type === "stream_event") {
-                    const d = ev.event && ev.event.delta
-                    if (d && d.type === "text_delta" && d.text) {
-                        proc.acc += d.text
-                        if (root.open && !root._pendingShow && proc.jobChannel === Backend.currentChannelId) {
-                            root._applyPartial(proc.acc)
-                            if (root.phase === "loading" && root.result.length > 0) root.phase = "ready"
-                        }
+                const d = ev.assistantMessageEvent
+                if (ev.type === "message_update" && d && d.type === "text_delta" && d.delta) {
+                    proc.acc += d.delta
+                    if (root.open && !root._pendingShow && proc.jobChannel === Backend.currentChannelId) {
+                        root._applyPartial(proc.acc)
+                        if (root.phase === "loading" && root.result.length > 0) root.phase = "ready"
                     }
-                } else if (ev.type === "result" && ev.subtype === "success" && typeof ev.result === "string") {
-                    proc.acc = ev.result   // authoritative full text
                 }
             }
         }

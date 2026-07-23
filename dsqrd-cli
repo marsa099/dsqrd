@@ -11,7 +11,7 @@ active-channel / notification-suppression state).
     dsqrd-cli messages <channel> --since-mine   everything after my last message
     dsqrd-cli summary <channel>             AI summary of what I missed since my
                                             last message (= messages --since-mine
-                                            piped through `claude -p`)
+                                            piped through `pi -p`)
     dsqrd-cli send <channel> <text>         send a message; @Name tokens are
                                             resolved to real mentions when the
                                             name matches a known user
@@ -182,13 +182,20 @@ def summarize(text, model):
         "is already below.\n\n"
         "===== CHAT LOG =====\n" + text + "\n===== END OF CHAT LOG ====="
     )
-    cmd = ["claude", "-p", "--model", model]
+    cmd = ["pi", "-p", "--no-session", "--no-tools", "--no-extensions",
+           "--no-skills", "--no-prompt-templates", "--no-context-files",
+           "--thinking", "off"]
+    if model:
+        cmd.extend(["--model", model])
+    env = os.environ.copy()
+    env["PI_SKIP_VERSION_CHECK"] = "1"
     try:
-        r = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=300)
+        r = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
+                           timeout=300, env=env)
     except FileNotFoundError:
-        sys.exit("dsqrd-cli: `claude` CLI not found — needed for summaries")
+        sys.exit("dsqrd-cli: `pi` CLI not found — needed for summaries")
     if r.returncode != 0:
-        sys.exit(f"dsqrd-cli: claude failed: {r.stderr.strip()}")
+        sys.exit(f"dsqrd-cli: pi failed: {r.stderr.strip()}")
     return r.stdout.strip()
 
 
@@ -204,11 +211,12 @@ def main():
     p.add_argument("--since-mine", action="store_true",
                    help="only messages after the last one I sent")
     p.add_argument("--summary", action="store_true", help="AI-summarize instead of printing")
-    p.add_argument("--model", default="claude-opus-4-8",
-                   help="claude model for --summary (default opus 4.8)")
+    p.add_argument("--model", default="",
+                   help="pi model for --summary (default: pi's configured model)")
     p = sub.add_parser("summary", help="AI summary of what I missed since my last message")
     p.add_argument("channel")
-    p.add_argument("--model", default="claude-opus-4-8")
+    p.add_argument("--model", default="",
+                   help="pi model (default: pi's configured model)")
     p = sub.add_parser("send", help="send a message to a channel")
     p.add_argument("channel")
     p.add_argument("text", nargs="+", help="message text (@Name becomes a real mention)")
