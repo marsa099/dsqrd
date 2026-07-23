@@ -784,38 +784,13 @@ Item {
         }
         openExternally(url)
     }
-    // Hand a URL to the system opener. NOT Qt.openUrlExternally: from a real
-    // (windowed) UI on Wayland, Qt routes through the desktop portal with a
-    // parent-window handle, and that silently drops the URL under niri +
-    // xdg-desktop-portal-gnome — only cold starts ever worked. Spawning
-    // xdg-open ourselves uses the plain mime-handler path, which is reliable.
+    // Respect the user's browser command when one is configured. This avoids
+    // duplicating browser/profile/focus policy in the app; on a stock desktop,
+    // keep using Qt's standard system-URL handoff.
     function openExternally(url) {
-        // The sh wrapper with redirected output is load-bearing, not just
-        // logging: a bare execDetached(["xdg-open", url]) silently dropped the
-        // handoff to an already-running browser (every warm open failed from
-        // the real UI while identical spawns from any other process worked) —
-        // the detached spawn context breaks something in the chromium remote
-        // handoff. Through a shell with stdio redirected to a file it is
-        // reliable, and the log doubles as a debug trail for the next time a
-        // link "doesn't open".
-        Quickshell.execDetached(["sh", "-c",
-            "{ echo \"$(date +%T.%3N) spawn url=$1\"; xdg-open \"$1\"; "
-          + "echo \"$(date +%T.%3N) exit=$?\"; } >>/tmp/dsqrd-open.log 2>&1",
-            "_", url])
-        _focusBrowser()
-    }
-    // Bring the browser forward after handing off a URL. xdg-open lands the tab
-    // in the already-running browser on whatever workspace it lives, and niri
-    // never jumps focus across workspaces on its own — so without this the
-    // opened link is invisible and `o`/the pickers look like they did nothing.
-    // Polls briefly so a cold-started browser window is caught too.
-    function _focusBrowser() {
-        Quickshell.execDetached(["sh", "-c",
-            "for i in $(seq 40); do "
-          + "id=$(niri msg --json windows | jq -r '[.[] | select((.app_id // \"\") | test(\"helium|zen|firefox|chromium|brave\"; \"i\"))] "
-          + "| sort_by(.focus_timestamp.secs // 0, .focus_timestamp.nanos // 0) | last | .id // empty'); "
-          + "[ -n \"$id\" ] && exec niri msg action focus-window --id \"$id\"; "
-          + "sleep 0.15; done"])
+        const browser = Quickshell.env("BROWSER")
+        if (browser) Quickshell.execDetached([browser, url])
+        else Qt.openUrlExternally(url)
     }
 
     // Open a Slack message permalink in-client: switch to its workspace/channel
