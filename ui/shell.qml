@@ -11,12 +11,9 @@ FloatingWindow {
     implicitWidth: 1180
     implicitHeight: 760
 
-    // Keycap chip + muted label — canonical QsLib family components,
-    // re-derived locally only to bake in the row anchoring.
+    // Keycap chip — canonical QsLib family component, re-derived locally
+    // only to bake in the row anchoring.
     component StatusCap: Lib.KeyCap {
-        anchors.verticalCenter: parent.verticalCenter
-    }
-    component CapLabel: Lib.CapLabel {
         anchors.verticalCenter: parent.verticalCenter
     }
 
@@ -746,39 +743,7 @@ FloatingWindow {
                     color: Theme.fg_muted
                     font.family: Theme.fontFamily; font.hintingPreference: Font.PreferNoHinting; font.pixelSize: 12
                 }
-                Row {
-                    id: hintRow
-                    visible: !Backend.updateAvailable
-                    // hide when the left status text would collide — opacity
-                    // (not visible) keeps implicitWidth measurable, so the
-                    // check can't feed back on itself. The ? badge stays put.
-                    opacity: (statusbar.width - leftStatus.width - implicitWidth - helpBadge.width
-                              - (issueStatus.visible ? issueStatus.implicitWidth + 12 : 0) - 70) >= 0 ? 1 : 0
-                    anchors.right: issueStatus.visible ? issueStatus.left : helpBadge.left
-                    anchors.rightMargin: 12
-                    anchors.verticalCenter: parent.verticalCenter
-                    spacing: 6
-                    StatusCap { text: "⌃k" }
-                    CapLabel { text: "jump" }
-                    Item { width: 8; height: 1 }
-                    StatusCap { text: "j" }
-                    StatusCap { text: "k" }
-                    CapLabel { text: "move" }
-                    Item { width: 8; height: 1 }
-                    StatusCap { text: "h" }
-                    StatusCap { text: "l" }
-                    CapLabel { text: "panel" }
-                    Item { width: 8; height: 1 }
-                    StatusCap { text: "↵" }
-                    CapLabel { text: "open" }
-                    Item { width: 8; height: 1 }
-                    StatusCap { text: "i" }
-                    CapLabel { text: "insert" }
-                    Item { width: 8; height: 1 }
-                    StatusCap { text: "esc" }
-                    CapLabel { text: "normal" }
-                }
-                Text { 
+                Text {
                     visible: Backend.updateAvailable
                     anchors.right: parent.right; anchors.rightMargin: 14
                     anchors.verticalCenter: parent.verticalCenter
