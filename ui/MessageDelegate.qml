@@ -348,7 +348,7 @@ Item {
                     HoverHandler { enabled: pillRect.isFile; cursorShape: Qt.PointingHandCursor }
                     TapHandler {
                         enabled: pillRect.isFile
-                        onTapped: if (img.link) Qt.openUrlExternally(img.link)
+                        onTapped: if (img.link) Backend.openExternally(img.link)
                     }
                     Row {
                         id: audioRow

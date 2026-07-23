@@ -389,7 +389,7 @@ FloatingWindow {
             if (e.key === Qt.Key_Escape || e.key === Qt.Key_Q) p.close()
             else if (e.key === Qt.Key_J || e.key === Qt.Key_Down) p.move(1)
             else if (e.key === Qt.Key_K || e.key === Qt.Key_Up) p.move(-1)
-            else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_O) p.openCurrent()
+            else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_O || e.key === Qt.Key_L) p.openCurrent()
             else if (e.text >= "1" && e.text <= "9" && e.text.length === 1) p.openAt(parseInt(e.text) - 1)
             e.accepted = true; return
         }

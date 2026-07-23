@@ -145,6 +145,7 @@ Item {
             KeyCap { text: "k"; anchors.verticalCenter: parent.verticalCenter }
             CapLabel { text: "move"; anchors.verticalCenter: parent.verticalCenter }
             KeyCap { text: "↵"; anchors.verticalCenter: parent.verticalCenter }
+            KeyCap { text: "l"; anchors.verticalCenter: parent.verticalCenter }
             CapLabel { text: "open"; anchors.verticalCenter: parent.verticalCenter }
             KeyCap { text: "q"; anchors.verticalCenter: parent.verticalCenter }
             CapLabel { text: "close"; anchors.verticalCenter: parent.verticalCenter }

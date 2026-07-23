@@ -128,7 +128,7 @@ Under the hood it's the same engine as `dsqrd-cli summary`: it takes the since-y
 
 Two more **fork additions**:
 
-- **Issue tracker** — the daemon polls `daphen/dsqrd` (override with `DSQRD_ISSUE_REPO`) for issues filed by `DSQRD_ISSUE_AUTHOR` (default `marsa099`) and the statusbar shows a quiet `upstream: N open · M closed` line (a pending update takes the corner instead). Press `!` — or click the line — for a takeover listing the issues; `1-9` opens a row's GitHub page directly, `j/k` + `enter` and clicking work too, `q`/`esc` closes.
+- **Issue tracker** — the daemon polls `daphen/dsqrd` (override with `DSQRD_ISSUE_REPO`) for issues filed by `DSQRD_ISSUE_AUTHOR` (default `marsa099`) and the statusbar shows a quiet `upstream: N open · M closed` line (a pending update takes the corner instead). Press `!` — or click the line — for a takeover listing the issues; `1-9` opens a row's GitHub page directly, `j/k` + `enter`/`l` and clicking work too, `q`/`esc` closes.
 - **Link chooser** — `o` on a message containing several URLs pops a numbered chooser (same keys as above) instead of silently opening only the first link. One link keeps the instant-open.
 
 ## Notes

@@ -742,7 +742,15 @@ Item {
             const sub = (url.match(/https?:\/\/([a-z0-9-]+)\.slack\.com/) || [])[1] || ""
             if (openPermalink(m[1], ts, tm ? tm[1] : "", sub, url)) return
         }
-        Qt.openUrlExternally(url)
+        openExternally(url)
+    }
+    // Hand a URL to the system opener. NOT Qt.openUrlExternally: from a real
+    // (windowed) UI on Wayland, Qt routes through the desktop portal with a
+    // parent-window handle, and that silently drops the URL under niri +
+    // xdg-desktop-portal-gnome — only cold starts ever worked. Spawning
+    // xdg-open ourselves uses the plain mime-handler path, which is reliable.
+    function openExternally(url) {
+        Quickshell.execDetached(["xdg-open", url])
         _focusBrowser()
     }
     // Bring the browser forward after handing off a URL. xdg-open lands the tab
@@ -1143,7 +1151,7 @@ Item {
         }
         else if (e.type === "jumpFailed") {
             // Couldn't fetch (private/no access) — open the original link instead.
-            if (_pendingJumpUrl !== "") { Qt.openUrlExternally(_pendingJumpUrl); _pendingJumpUrl = "" }
+            if (_pendingJumpUrl !== "") { openExternally(_pendingJumpUrl); _pendingJumpUrl = "" }
         }
         else if (e.type === "history") prependOlder(e.channel, e.msgs)
         else if (e.type === "replies") setThread(e.channel, e.thread, e.msgs)
