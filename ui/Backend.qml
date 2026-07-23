@@ -61,6 +61,19 @@ Item {
         else toast("No update command set — configure SLK_UPDATE_CMD")
     }
 
+    // Upstream issue tracker: the daemon polls daphen's repo for issues filed by
+    // the fork owner; the statusbar shows a quiet summary. An available update
+    // takes precedence over this line (see shell.qml).
+    property var trackedIssues: []   // [{number, title, state}]
+    readonly property string issueSummary: {
+        if (!trackedIssues.length) return ""
+        const open = trackedIssues.filter(i => i.state === "open").length
+        const closed = trackedIssues.length - open
+        let s = "upstream: " + open + " open"
+        if (closed > 0) s += " · " + closed + " closed"
+        return s
+    }
+
     // Multiple Slack workspaces. The sidebar shows one workspace at a time;
     // channels are keyed by id (names collide across workspaces).
     property var    workspaces: []          // [{id, name}]
@@ -1073,6 +1086,7 @@ Item {
         else if (e.type === "replyCountInc") bumpReplyCount(e.channel, e.ts)
         else if (e.type === "workspaces") setWorkspaces(e.workspaces, e.rail, e.threads)
         else if (e.type === "updateAvailable") { updateCurrent = e.current || ""; updateLatest = e.latest || ""; updateAvailable = true }
+        else if (e.type === "issueTracker") { trackedIssues = e.issues || [] }
         else if (e.type === "users") { _usersByWs = e.users || ({}) }
         else if (e.type === "reaction") applyReaction(e.channel, e.ts, e.reactionsJson)
         else if (e.type === "images") applyImages(e.channel, e.ts, e.imagesJson)

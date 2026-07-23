@@ -43,6 +43,11 @@ from dchat.notifier import Notifier
 
 SOCK = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "dsqrd.sock")
 GIT_REV = os.environ.get("DSQRD_REV", "")   # baked build rev; empty on source runs
+# Upstream issue tracker: repo + author whose filed issues the UI status line follows
+ISSUE_REPO = (os.environ.get("DSQRD_ISSUE_REPO")
+              or os.environ.get("DSQRD_UPSTREAM_REPO")
+              or "daphen/dsqrd")
+ISSUE_AUTHOR = os.environ.get("DSQRD_ISSUE_AUTHOR", "marsa099")
 
 
 def _have_ffmpeg():
@@ -627,6 +632,9 @@ class DQS:
         self.update_event = None   # latest updateAvailable event, replayed to new clients
         self._update_etag = None   # GitHub ETag: conditional requests are free
         self._last_update_check = 0.0
+        self.issues_event = None   # latest issueTracker event, replayed to new clients
+        self._issues_etag = None
+        self._last_issues_check = 0.0
 
     # ---- wire helpers ----
     def write(self, conn, obj):
@@ -779,6 +787,8 @@ class DQS:
     def send_bootstrap(self, conn):
         if self.update_event:   # replay update-available state to a (re)connecting client
             self.write(conn, self.update_event)
+        if self.issues_event:   # replay upstream-issue status to a (re)connecting client
+            self.write(conn, self.issues_event)
         self.write(conn, self._workspaces_msg())
         self.write(conn, {"type": "users", "users": self.users_payload()})
         self.write(conn, self._channels_msg())
@@ -1753,6 +1763,8 @@ class DQS:
         # restart never surfaced a new build. Throttled + ETag-conditional.
         if GIT_REV and (time.time() - self._last_update_check) > 60:
             threading.Thread(target=self._check_update_once, daemon=True).start()
+        if (time.time() - self._last_issues_check) > 60:
+            threading.Thread(target=self._check_issues_once, daemon=True).start()
         self.read_conn(conn)
 
     def _check_update_once(self):
@@ -1847,16 +1859,41 @@ class DQS:
                              "current": GIT_REV[:7], "latest": latest[:7]}
         self.broadcast(self.update_event)
 
+    def _check_issues_once(self):
+        """Poll upstream (daphen) for issues filed by the fork owner, so the UI
+        can show a quiet tracker line ("N open · M closed") for feature requests
+        sent upstream. ETag-conditional like the update check."""
+        self._last_issues_check = time.time()
+        api = (f"https://api.github.com/repos/{ISSUE_REPO}/issues"
+               f"?creator={ISSUE_AUTHOR}&state=all&per_page=30")
+        try:
+            headers = {"User-Agent": "dsqrd", "Accept": "application/vnd.github+json"}
+            if self._issues_etag:
+                headers["If-None-Match"] = self._issues_etag
+            with urllib.request.urlopen(urllib.request.Request(api, headers=headers), timeout=15) as r:
+                self._issues_etag = r.headers.get("ETag") or self._issues_etag
+                data = json.loads(r.read().decode())
+            issues = [{"number": i.get("number"), "title": i.get("title") or "",
+                       "state": i.get("state") or "open"}
+                      for i in data if "pull_request" not in i]
+            self.issues_event = {"type": "issueTracker", "issues": issues}
+            self.broadcast(self.issues_event)
+        except urllib.error.HTTPError as e:
+            if e.code != 304:   # 304 = unchanged (ETag hit); anything else: retry next cycle
+                pass
+        except Exception:
+            pass
+
     def check_updates(self):
         """Tell the client when a newer build exists. Detect-only — applying is the
         host's job (flake bump + rebuild). Quiet on source runs (DSQRD_REV unset).
         Checks at start, then every 3h; also re-checked when a client connects
         (see _serve_conn) so restarting the app surfaces a new build immediately
         instead of waiting on the warm daemon's next poll."""
-        if not GIT_REV:
-            return
         while True:
-            self._check_update_once()
+            if GIT_REV:
+                self._check_update_once()
+            self._check_issues_once()
             time.sleep(3 * 3600)
 
     def drain_presence(self):

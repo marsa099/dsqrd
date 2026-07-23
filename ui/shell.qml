@@ -734,14 +734,28 @@ FloatingWindow {
                     HoverHandler { cursorShape: Qt.PointingHandCursor }
                     TapHandler { onTapped: help.show() }
                 }
+                // Quiet tracker for feature requests filed on daphen's upstream —
+                // deliberately low-key (fg_muted, no chip). Yields the corner to
+                // the orange update message when one is pending.
+                Text {
+                    id: issueStatus
+                    visible: !Backend.updateAvailable && text !== ""
+                    anchors.right: helpBadge.left; anchors.rightMargin: 12
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: Backend.issueSummary
+                    color: Theme.fg_muted
+                    font.family: Theme.fontFamily; font.hintingPreference: Font.PreferNoHinting; font.pixelSize: 12
+                }
                 Row {
                     id: hintRow
                     visible: !Backend.updateAvailable
                     // hide when the left status text would collide — opacity
                     // (not visible) keeps implicitWidth measurable, so the
                     // check can't feed back on itself. The ? badge stays put.
-                    opacity: (statusbar.width - leftStatus.width - implicitWidth - helpBadge.width - 70) >= 0 ? 1 : 0
-                    anchors.right: helpBadge.left; anchors.rightMargin: 12
+                    opacity: (statusbar.width - leftStatus.width - implicitWidth - helpBadge.width
+                              - (issueStatus.visible ? issueStatus.implicitWidth + 12 : 0) - 70) >= 0 ? 1 : 0
+                    anchors.right: issueStatus.visible ? issueStatus.left : helpBadge.left
+                    anchors.rightMargin: 12
                     anchors.verticalCenter: parent.verticalCenter
                     spacing: 6
                     StatusCap { text: "⌃k" }
