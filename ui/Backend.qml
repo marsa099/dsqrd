@@ -800,7 +800,6 @@ Item {
 
     function openUrl(url) {
         const m = (url || "").match(/\/archives\/([A-Z0-9]+)\/p(\d+)/)
-        console.log("DBG2 openUrl url=" + url + " match=" + (m ? "yes" : "no") + " sockConn=" + sock.connected)
         if (m && m[2].length > 6) {
             const ts = m[2].slice(0, -6) + "." + m[2].slice(-6)
             const tm = url.match(/[?&]thread_ts=([0-9.]+)/)
@@ -811,10 +810,16 @@ Item {
     }
     // Respect the user's browser command when one is configured. This avoids
     // duplicating browser/profile/focus policy in the app; on a stock desktop,
-    // keep using Qt's standard system-URL handoff.
+    // keep using Qt's standard system-URL handoff. The long-running UI keeps
+    // the $BROWSER it was started with, which can go stale (point at a
+    // since-removed command) — spawning that directly dies silently and every
+    // link open "does nothing", so verify it resolves and fall back to
+    // xdg-open (the system handler tracks the current browser choice).
     function openExternally(url) {
         const browser = Quickshell.env("BROWSER")
-        if (browser) Quickshell.execDetached([browser, url])
+        if (browser) Quickshell.execDetached(["sh", "-c",
+            'command -v "$1" >/dev/null 2>&1 && exec "$1" "$2"; exec xdg-open "$2"',
+            "_", browser, url])
         else Qt.openUrlExternally(url)
     }
 
@@ -823,7 +828,6 @@ Item {
     // (caller then falls back to the browser). threadTs opens the thread.
     function openPermalink(channelId, ts, threadTs, sub, url) {
         const ch = _findChannel(channelId)
-        console.log("DBG2 openPermalink ch=" + (ch ? ch.name : "NULL") + " sub=" + sub + " ts=" + ts)
         if (!ch && !sub) return false   // not joined and no team to route by → browser
         if (threadOpen) closeThread()
         _pendingJumpUrl = url || ""
