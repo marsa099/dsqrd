@@ -397,17 +397,24 @@ FloatingWindow {
     function routeKey(e) {
         const ctrl = e.modifiers & Qt.ControlModifier
         // Copilot takeover: q / esc close it, l flips Swedish/English, f opens
-        // the feedback field; swallow everything else so the app stays frozen.
+        // the feedback field, a opens the ask-a-question field; swallow
+        // everything else so the app stays frozen.
         if (copilot.open) {
             if (copilot.feedbackMode) {
                 if (e.key === Qt.Key_Escape) copilot.cancelFeedback()
                 else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter) copilot.submitFeedback()
                 else if (e.key === Qt.Key_Backspace) copilot.feedbackText = copilot.feedbackText.slice(0, -1)
                 else if (e.text && e.text.length === 1 && e.text.charCodeAt(0) >= 0x20) copilot.feedbackText += e.text
+            } else if (copilot.askMode) {
+                if (e.key === Qt.Key_Escape) copilot.cancelAsk()
+                else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter) copilot.submitAsk()
+                else if (e.key === Qt.Key_Backspace) copilot.askText = copilot.askText.slice(0, -1)
+                else if (e.text && e.text.length === 1 && e.text.charCodeAt(0) >= 0x20) copilot.askText += e.text
             } else {
                 if (e.key === Qt.Key_Escape || e.key === Qt.Key_Q) copilot.close()
                 else if (e.key === Qt.Key_L) copilot.toggleLang()
                 else if (e.key === Qt.Key_F) copilot.startFeedback()
+                else if (e.key === Qt.Key_A) copilot.startAsk()
             }
             e.accepted = true; return
         }

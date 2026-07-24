@@ -45,7 +45,7 @@ Item {
     // a one-line log with "I don't see a chat log, paste it".
     readonly property string _instr:
         "Catch me up on a Discord channel. Everything between the CHAT LOG markers below is "
-      + "the last 50 messages for context. Summarize ONLY messages below the "
+      + "the recent message history for context. Summarize ONLY messages below the "
       + "'LAST READ — SUMMARIZE MESSAGES BELOW' line; use earlier messages only "
       + "to understand references and never include them as catch-up items. Summarize the unread part as "
       + "markdown bullets: each bullet starts with '- ' and is ONE short line, "
@@ -140,6 +140,57 @@ Item {
     }
     Component.onCompleted: rulesLoader.running = true
 
+    // ── ask → refined summary ─────────────────────────────────────────────
+    // `a` opens an inline question field (typed via shell.routeKey, same
+    // pattern as feedback). The question is answered from the chat log and
+    // folded into a regenerated summary as its own bullet, which replaces the
+    // cached one — so the answer sticks until new messages produce a fresh
+    // summary. Questions accumulate per channel while the log's newest ts is
+    // unchanged, so a second question keeps the first answer too.
+    property bool askMode: false
+    property string askText: ""
+    property var _asked: ({})   // channel -> {ts, qs: [...]}
+
+    function _questionsFor(channel, ts) {
+        const a = _asked[channel]
+        return (a && a.ts === ts) ? a.qs : []
+    }
+    function startAsk() {
+        if (phase !== "ready" && phase !== "error") return
+        askMode = true
+        askText = ""
+    }
+    function cancelAsk() { askMode = false; askText = "" }
+    function submitAsk() {
+        const q = askText.trim()
+        askMode = false
+        askText = ""
+        if (q.length === 0) return
+        const ch = Backend.currentChannelId
+        const c = Backend.catchupSince()
+        const entry = (_asked[ch] && _asked[ch].ts === c.lastTs)
+            ? _asked[ch] : { ts: c.lastTs, qs: [] }
+        entry.qs.push(q)
+        _asked[ch] = entry
+        sourceCount = c.count
+        resultSv = ""
+        resultEn = ""
+        phase = "loading"
+        if (proc.running) { _pendingShow = true; return }
+        _startJob(ch, c.lastTs, c.text)
+    }
+    function _askBlock(qs) {
+        return "I also have the following question(s) about this chat. Answer each "
+          + "strictly from the chat log — the WHOLE log, including messages above "
+          + "the LAST READ line — as its own additional bullet in the same style "
+          + "(key part bolded), placed right after any '- @me' bullets and before "
+          + "the catch-up bullets; answer bullets don't count against the bullet "
+          + "limit. If the log doesn't answer a question, say so in that bullet. "
+          + "If there is no 'LAST READ — SUMMARIZE MESSAGES BELOW' line in the "
+          + "log, output ONLY the answer bullets and no catch-up bullets.\n"
+          + "Questions:\n" + qs.map(q => "- " + q).join("\n") + "\n\n"
+    }
+
     function toggleLang() { lang = lang === "en" ? "sv" : "en" }
     function show() {
         open = true
@@ -147,24 +198,27 @@ Item {
         resultEn = ""
         const c = Backend.catchupSince()
         sourceCount = c.count
-        if (c.count === 0) {
+        const qs = _questionsFor(Backend.currentChannelId, c.lastTs)
+        if (c.count === 0 && qs.length === 0) {
             phase = "ready"
             resultSv = "Inget att sammanfatta i den här kanalen än. ✨"
             resultEn = "Nothing to summarize in this channel yet. ✨"
             return
         }
         const hit = _cache[Backend.currentChannelId]
-        if (hit && hit.ts === c.lastTs) {
+        if (hit && hit.ts === c.lastTs && (hit.qn || 0) === qs.length) {
             resultEn = hit.en; resultSv = hit.sv
             phase = "ready"
             return
         }
         phase = "loading"
         if (proc.running) {
-            // A prefetch for exactly this channel+ts is mid-flight: attach to
-            // its stream. Anything else: wait for it to finish (killing it
-            // wastes the already-spent prompt), then show() re-runs.
-            if (proc.jobChannel === Backend.currentChannelId && proc.jobTs === c.lastTs) {
+            // A prefetch for exactly this channel+ts (with the same asked
+            // questions) is mid-flight: attach to its stream. Anything else:
+            // wait for it to finish (killing it wastes the already-spent
+            // prompt), then show() re-runs.
+            if (proc.jobChannel === Backend.currentChannelId && proc.jobTs === c.lastTs
+                && proc.jobQn === qs.length) {
                 if (proc.acc.length > 0) { _applyPartial(proc.acc); if (result.length > 0) phase = "ready" }
             } else _pendingShow = true
             return
@@ -179,6 +233,8 @@ Item {
         _pendingShow = false
         feedbackMode = false
         feedbackText = ""
+        askMode = false
+        askText = ""
     }
 
     // Speculative prefetch — the debounce below arms this on channel switch and
@@ -190,7 +246,8 @@ Item {
         const c = Backend.catchupSince()
         if (c.sinceCount < 5 || !c.lastTs) return
         const hit = _cache[Backend.currentChannelId]
-        if (hit && hit.ts === c.lastTs) return
+        if (hit && hit.ts === c.lastTs
+            && (hit.qn || 0) === _questionsFor(Backend.currentChannelId, c.lastTs).length) return
         _startJob(Backend.currentChannelId, c.lastTs, c.text)
     }
     Timer {
@@ -216,14 +273,17 @@ Item {
     }
 
     function _startJob(channel, ts, text) {
+        const qs = _questionsFor(channel, ts)
         proc.jobChannel = channel
         proc.jobTs = ts
+        proc.jobQn = qs.length
         proc.acc = ""
         // base64 the prompt so the transcript (åäö, emoji, quotes) survives the
         // shell untouched, then decode straight into `pi`. Qt.btoa already
         // UTF-8-encodes the string, so pass it raw — wrapping it in
         // unescape(encodeURIComponent()) would double-encode and mojibake it.
         proc.b64 = Qt.btoa(_instr
+            + (qs.length > 0 ? _askBlock(qs) : "")
             + (rules ? "Standing user rules — follow them strictly:\n" + rules + "\n\n" : "")
             + "===== CHAT LOG =====\n" + text + "\n===== END OF CHAT LOG =====")
         proc.running = true
@@ -243,6 +303,7 @@ Item {
         property string b64: ""
         property string jobChannel: ""
         property string jobTs: ""
+        property int jobQn: 0
         property string acc: ""
         // pi's JSON event mode exposes text deltas, preserving the streaming UI
         // while using pi's configured provider/model. This one-shot has no tools,
@@ -270,7 +331,7 @@ Item {
                 const en = sv[0].split("===EN===")
                 const enTxt = (en.length > 1 ? en[en.length - 1] : sv[0]).trim()
                 const svTxt = ((sv.length > 1 ? sv[1] : "").trim()) || enTxt
-                root._cache[proc.jobChannel] = { ts: proc.jobTs, en: enTxt, sv: svTxt }
+                root._cache[proc.jobChannel] = { ts: proc.jobTs, en: enTxt, sv: svTxt, qn: proc.jobQn }
             }
             if (root._pendingShow) {
                 root._pendingShow = false
@@ -386,7 +447,8 @@ Item {
                 // overflowing the screen or running under the bottom legend and
                 // the inline feedback UI.
                 height: Math.min(body.implicitHeight, root.height - 220 - card.hintInset
-                                 - (feedbackCol.visible ? feedbackCol.height + 14 : 0))
+                                 - (feedbackCol.visible ? feedbackCol.height + 14 : 0)
+                                 - (askCol.visible ? askCol.height + 14 : 0))
                 contentHeight: body.implicitHeight
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
@@ -442,26 +504,51 @@ Item {
                            font.hintingPreference: Font.PreferNoHinting; font.pixelSize: 13 }
                 }
             }
+
+            // ── ask: inline question input (a) ─────────────────────────────
+            Column {
+                id: askCol
+                visible: root.askMode
+                width: parent.width
+                spacing: 10
+                Rectangle { width: parent.width; height: 1; color: Theme.hairline }
+                Row {
+                    width: parent.width
+                    spacing: 8
+                    Text { renderType: Text.NativeRendering; text: "Fråga:"
+                           color: Theme.sky; font.family: Theme.fontFamily
+                           font.hintingPreference: Font.PreferNoHinting; font.pixelSize: 13; font.weight: 600 }
+                    Text { renderType: Text.NativeRendering
+                           text: root.askText + "▏"
+                           width: parent.width - 90
+                           wrapMode: Text.Wrap
+                           color: Theme.fg; font.family: Theme.fontFamily
+                           font.hintingPreference: Font.PreferNoHinting; font.pixelSize: 13 }
+                }
+            }
         }
 
         // dismiss hint
         Row {
             id: hintRow
+            readonly property bool typing: root.feedbackMode || root.askMode
             anchors.right: parent.right; anchors.rightMargin: 16
             anchors.bottom: parent.bottom; anchors.bottomMargin: 12
             spacing: 6
             visible: root.phase !== "loading"
-            KeyCap { visible: !root.feedbackMode; text: "l"; anchors.verticalCenter: parent.verticalCenter }
-            CapLabel { visible: !root.feedbackMode; text: root.lang === "sv" ? "English" : "svenska"
+            KeyCap { visible: !hintRow.typing; text: "l"; anchors.verticalCenter: parent.verticalCenter }
+            CapLabel { visible: !hintRow.typing; text: root.lang === "sv" ? "English" : "svenska"
                        anchors.verticalCenter: parent.verticalCenter }
-            KeyCap { visible: !root.feedbackMode; text: "f"; anchors.verticalCenter: parent.verticalCenter }
-            CapLabel { visible: !root.feedbackMode; text: "feedback"; anchors.verticalCenter: parent.verticalCenter }
-            KeyCap { visible: !root.feedbackMode; text: "q"; anchors.verticalCenter: parent.verticalCenter }
-            CapLabel { visible: !root.feedbackMode; text: "stäng"; anchors.verticalCenter: parent.verticalCenter }
-            KeyCap { visible: root.feedbackMode; text: "enter"; anchors.verticalCenter: parent.verticalCenter }
-            CapLabel { visible: root.feedbackMode; text: "skicka"; anchors.verticalCenter: parent.verticalCenter }
-            KeyCap { visible: root.feedbackMode; text: "esc"; anchors.verticalCenter: parent.verticalCenter }
-            CapLabel { visible: root.feedbackMode; text: "avbryt"; anchors.verticalCenter: parent.verticalCenter }
+            KeyCap { visible: !hintRow.typing; text: "a"; anchors.verticalCenter: parent.verticalCenter }
+            CapLabel { visible: !hintRow.typing; text: "fråga"; anchors.verticalCenter: parent.verticalCenter }
+            KeyCap { visible: !hintRow.typing; text: "f"; anchors.verticalCenter: parent.verticalCenter }
+            CapLabel { visible: !hintRow.typing; text: "feedback"; anchors.verticalCenter: parent.verticalCenter }
+            KeyCap { visible: !hintRow.typing; text: "q"; anchors.verticalCenter: parent.verticalCenter }
+            CapLabel { visible: !hintRow.typing; text: "stäng"; anchors.verticalCenter: parent.verticalCenter }
+            KeyCap { visible: hintRow.typing; text: "enter"; anchors.verticalCenter: parent.verticalCenter }
+            CapLabel { visible: hintRow.typing; text: "skicka"; anchors.verticalCenter: parent.verticalCenter }
+            KeyCap { visible: hintRow.typing; text: "esc"; anchors.verticalCenter: parent.verticalCenter }
+            CapLabel { visible: hintRow.typing; text: "avbryt"; anchors.verticalCenter: parent.verticalCenter }
         }
     }
 }
