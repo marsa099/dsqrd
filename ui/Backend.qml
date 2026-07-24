@@ -70,17 +70,8 @@ Item {
     }
 
     // Upstream issue tracker: the daemon polls daphen's repo for issues filed by
-    // the fork owner; the statusbar shows a quiet summary. An available update
-    // takes precedence over this line (see shell.qml).
+    // the fork owner; `!` opens the takeover listing them.
     property var trackedIssues: []   // [{number, title, state}]
-    readonly property string issueSummary: {
-        if (!trackedIssues.length) return ""
-        const open = trackedIssues.filter(i => i.state === "open").length
-        const closed = trackedIssues.length - open
-        let s = "upstream: " + open + " open"
-        if (closed > 0) s += " · " + closed + " closed"
-        return s
-    }
 
     // Multiple Slack workspaces. The sidebar shows one workspace at a time;
     // channels are keyed by id (names collide across workspaces).

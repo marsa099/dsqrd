@@ -763,27 +763,14 @@ FloatingWindow {
                     HoverHandler { cursorShape: Qt.PointingHandCursor }
                     TapHandler { onTapped: help.show() }
                 }
-                // Quiet tracker for feature requests filed on daphen's upstream.
-                // Click it (or press `!`) to open the issues takeover.
-                Text {
-                    id: issueStatus
-                    visible: !Backend.updateAvailable && text !== ""
-                    anchors.right: helpBadge.left; anchors.rightMargin: 12
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: Backend.issueSummary
-                    color: Theme.fg_muted
-                    font.family: Theme.fontFamily; font.hintingPreference: Font.PreferNoHinting; font.pixelSize: 12
-                    HoverHandler { cursorShape: Qt.PointingHandCursor }
-                    TapHandler { onTapped: issuesPanel.show() }
-                }
                 Row {
                     id: hintRow
                     visible: !Backend.updateAvailable
-                    // Keep upstream's slim jump hint when it fits; opacity avoids
-                    // feeding the available-width calculation back into itself.
-                    opacity: (statusbar.width - leftStatus.width - implicitWidth
-                              - issueStatus.implicitWidth - helpBadge.width - 82) >= 0 ? 1 : 0
-                    anchors.right: issueStatus.left; anchors.rightMargin: 12
+                    // hide when the left status text would collide — opacity
+                    // (not visible) keeps implicitWidth measurable, so the
+                    // check can't feed back on itself. The ? badge stays put.
+                    opacity: (statusbar.width - leftStatus.width - implicitWidth - helpBadge.width - 70) >= 0 ? 1 : 0
+                    anchors.right: helpBadge.left; anchors.rightMargin: 12
                     anchors.verticalCenter: parent.verticalCenter
                     spacing: 6
                     StatusCap { text: "ctrl k" }
@@ -887,7 +874,7 @@ FloatingWindow {
                 onOpenChanged: if (!open) win.backToNormal()
             }
 
-            // Upstream issue tracker takeover (`!` / clicking the statusbar line).
+            // Upstream issue tracker takeover (`!`).
             IssuesPanel {
                 id: issuesPanel
                 z: 105
