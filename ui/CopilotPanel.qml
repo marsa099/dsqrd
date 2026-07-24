@@ -301,7 +301,10 @@ Item {
         id: card
         anchors.centerIn: parent
         width: Math.min(660, parent.width - 80)
-        height: Math.min(parent.height - 100, contentCol.implicitHeight + 40)
+        // The dismiss-hint legend overlays the card's bottom edge; reserve its
+        // height (plus breathing room) so content never runs underneath it.
+        readonly property real hintInset: hintRow.visible ? hintRow.height + 24 : 0
+        height: Math.min(parent.height - 100, contentCol.implicitHeight + 40 + hintInset)
         radius: Theme.radiusInner
         color: Theme.surface
         border.width: 1; border.color: Theme.hairline
@@ -380,8 +383,10 @@ Item {
                 // Size to the text's natural height (independent of the card, which
                 // sizes to us — referencing card.height here would be circular and
                 // collapse to zero), capped so a long summary scrolls instead of
-                // overflowing the screen.
-                height: Math.min(body.implicitHeight, root.height - 220)
+                // overflowing the screen or running under the bottom legend and
+                // the inline feedback UI.
+                height: Math.min(body.implicitHeight, root.height - 220 - card.hintInset
+                                 - (feedbackCol.visible ? feedbackCol.height + 14 : 0))
                 contentHeight: body.implicitHeight
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
@@ -400,6 +405,7 @@ Item {
 
             // ── feedback: inline input (f) or processing pulse ─────────────
             Column {
+                id: feedbackCol
                 visible: root.feedbackMode || root.feedbackBusy
                 width: parent.width
                 spacing: 10
@@ -440,6 +446,7 @@ Item {
 
         // dismiss hint
         Row {
+            id: hintRow
             anchors.right: parent.right; anchors.rightMargin: 16
             anchors.bottom: parent.bottom; anchors.bottomMargin: 12
             spacing: 6
