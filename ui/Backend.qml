@@ -678,12 +678,15 @@ Item {
         return null
     }
     // Read boundary captured by the daemon before opening a channel marks it
-    // read. Copilot always gets the last 50 rows as context, but only summarizes
-    // rows from this message onward.
+    // read. Copilot gets the last 100 rows as context — grown in 100-row steps
+    // (capped at 2000, matching the daemon's paging) until the boundary is
+    // inside the window — but only summarizes rows from this message onward.
     property var _catchupStart: ({})  // channel -> first unread ts; "" = caught up
     function catchupSince() {
         const arr = _store[currentChannelId] || []
-        const window = arr.slice(-50)
+        const cap = Math.min(arr.length, 2000)
+        let take = Math.min(100, cap)
+        let window = arr.slice(-take)
         const fmt = (m) => {
             let t = plainText(m.text || "").trim()
             if (!t && m.imagesJson && m.imagesJson !== "[]") t = "[attachment]"
@@ -697,8 +700,13 @@ Item {
                 if (window[i].mine) { start = i + 1; break }
             if (start < 0 && window.length > 0) start = 0
         } else if (boundary !== "") {
-            start = window.findIndex(m => String(m.ts || "") === String(boundary))
-            if (start < 0) start = 0 // read boundary predates the 50-row window
+            while (true) {
+                start = window.findIndex(m => String(m.ts || "") === String(boundary))
+                if (start >= 0 || take >= cap) break
+                take = Math.min(take + 100, cap)
+                window = arr.slice(-take)
+            }
+            if (start < 0) start = 0 // read boundary predates even the grown window
         }
         const count = start < 0 ? 0 : window.length - start
         const rows = window.map(fmt)

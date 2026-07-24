@@ -841,10 +841,11 @@ class DQS:
             self.gateway.subscribe(channel_id, self.guild_for(channel_id))
         except Exception:
             pass
-        msgs = self.discord.get_messages(channel_id, num=50) or []
+        msgs = self.discord.get_messages(channel_id, num=100) or []
         # Snapshot the server read boundary before the UI acknowledges this open.
-        # Copilot receives all 50 rows for context, but summarizes only rows after
-        # this marker (rather than guessing from the user's last sent message).
+        # Copilot receives the fetched window for context, but summarizes only
+        # rows after this marker (rather than guessing from the user's last sent
+        # message).
         read_states = self.gateway.get_read_state() or {}
         while True:
             ack = self.gateway.get_message_ack()
@@ -856,6 +857,18 @@ class DQS:
                     ack.get("message_id") or "")
         state = read_states.get(channel_id, {})
         last_read = str(state.get("last_acked_message_id") or "")
+        # If the read boundary predates the fetched window, page further back
+        # (Discord caps a page at 100) until it's inside, so a long absence
+        # still yields every unread message for the catch-up — hard stop at
+        # 2000 rows so a months-old boundary can't fetch forever.
+        if last_read:
+            while (0 < len(msgs) < 2000
+                   and int(msgs[-1].get("id") or 0) > int(last_read)):
+                older = self.discord.get_messages(channel_id, num=100,
+                                                  before=msgs[-1].get("id")) or []
+                if not older:
+                    break
+                msgs += older
         catchup_start = ""
         if last_read:
             unread = [m for m in msgs if int(m.get("id") or 0) > int(last_read)]
