@@ -35,6 +35,7 @@ atexit.register(lambda: print("dsqrd: process exiting", flush=True))
 import urllib.error
 import urllib.parse
 import urllib.request
+import websocket   # CDP client for the hidden voice Helium (also a dchat dep)
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -602,6 +603,192 @@ def map_msg(m):
     }
 
 
+VOICE_PROFILE = os.path.join(_data_dir(), "voice-helium")   # dedicated Discord login
+VOICE_CDP_PORT = 9333
+
+
+class VoiceCall:
+    """Discord voice via a hidden Helium (real Chromium) driven over CDP.
+
+    dsqrd never shows the browser: on join it spawns Helium at the voice
+    channel with a debug port, then injects JS to click Join / toggle Mute /
+    Disconnect and to read call state, which it hands back to the UI. A niri
+    rule parks the window on an unused workspace; anti-throttle flags keep the
+    audio alive while it's hidden. It's the real Discord web client, so voice
+    works and there's no bespoke-stack ban risk."""
+
+    _JOIN = ("(function(){var b=[...document.querySelectorAll('[aria-label],button')]"
+             ".find(e=>/join voice|join call/i.test((e.getAttribute&&e.getAttribute('aria-label'))||e.textContent||''));"
+             "if(b){b.click();return 'joined';}return 'no-button';})()")
+    _MUTE = ("(function(){var b=[...document.querySelectorAll('button[aria-label]')]"
+             ".find(e=>/^(mute|unmute)$/i.test(e.getAttribute('aria-label')));"
+             "if(b)b.click();return b?b.getAttribute('aria-label'):null;})()")
+    _LEAVE = ("(function(){var b=[...document.querySelectorAll('button[aria-label]')]"
+              ".find(e=>/disconnect/i.test(e.getAttribute('aria-label')));"
+              "if(b){b.click();return 'left';}return 'no-button';})()")
+    _STATE = ("(function(){var a=[...document.querySelectorAll('button[aria-label]')];"
+              "var dc=a.find(e=>/disconnect/i.test(e.getAttribute('aria-label')));"
+              "var mb=a.find(e=>/^(mute|unmute)$/i.test(e.getAttribute('aria-label')));"
+              "return {connected:!!dc,muted:mb?/unmute/i.test(mb.getAttribute('aria-label')):false};})()")
+
+    def __init__(self, on_state):
+        self.on_state = on_state    # callback(state dict) → broadcast to UIs
+        self.proc = None
+        self.ws = None
+        self._id = 0
+        self.channel_id = None
+        self.lock = threading.RLock()
+        self._poll = None
+        atexit.register(self._kill_proc)
+
+    # ---- CDP plumbing ----
+    def _attach(self):
+        url = f"http://localhost:{VOICE_CDP_PORT}/json"
+        for _ in range(60):   # ~12s for Helium + the page target to come up
+            try:
+                data = json.load(urllib.request.urlopen(url, timeout=1))
+                pages = [t for t in data if t.get("type") == "page" and t.get("webSocketDebuggerUrl")]
+                if pages:
+                    self.ws = websocket.create_connection(pages[0]["webSocketDebuggerUrl"], timeout=6)
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.2)
+        return False
+
+    def _eval(self, expr):
+        """Runtime.evaluate injected JS on the page; return its (by-value) result."""
+        if not self.ws:
+            return None
+        self._id += 1
+        mid = self._id
+        self.ws.send(json.dumps({"id": mid, "method": "Runtime.evaluate", "params": {
+            "expression": expr, "awaitPromise": True, "returnByValue": True}}))
+        for _ in range(200):   # skip interleaved CDP events, find our reply
+            m = json.loads(self.ws.recv())
+            if m.get("id") == mid:
+                return ((m.get("result") or {}).get("result") or {}).get("value")
+        return None
+
+    def _kill_proc(self):
+        # setsid reparents Helium to init, so self.proc (the launcher) can't
+        # reach it — kill by the unique window class instead.
+        self.proc = None
+        try:
+            subprocess.run(["pkill", "-TERM", "-f", "class=dsqrd-voice"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+    # ---- public verbs (called from dispatch threads) ----
+    def join(self, guild_id, channel_id):
+        with self.lock:
+            self._teardown()   # one call at a time
+            gid = guild_id or "@me"
+            self.channel_id = channel_id
+            os.makedirs(VOICE_PROFILE, exist_ok=True)
+            # A hard-killed prior Helium leaves a stale SingletonLock; the next
+            # launch then hands off to a dead pid and exits instantly.
+            for f in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+                try:
+                    os.remove(os.path.join(VOICE_PROFILE, f))
+                except OSError:
+                    pass
+            # helium lives in the user/system profile, not the daemon's Nix
+            # closure — make sure it's on PATH for the spawn.
+            env = dict(os.environ)
+            env["PATH"] = "/etc/profiles/per-user/{}/bin:/run/current-system/sw/bin:{}".format(
+                os.environ.get("USER", ""), env.get("PATH", ""))
+            # setsid: helium's bwrap sets PR_SET_PDEATHSIG keyed to the parent
+            # thread, so it dies when this dispatch thread returns. Reparenting
+            # to init via setsid keeps it alive for the call's lifetime.
+            self.proc = subprocess.Popen([
+                "setsid",
+                "helium", f"--app=https://discord.com/channels/{gid}/{channel_id}",
+                f"--user-data-dir={VOICE_PROFILE}", "--class=dsqrd-voice",
+                f"--remote-debugging-port={VOICE_CDP_PORT}",
+                # modern Chromium rejects CDP WebSocket handshakes with an
+                # Origin unless allow-listed; without this the attach fails and
+                # we tear the call straight back down. Loopback-only port, so *.
+                "--remote-allow-origins=*",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding",
+                "--disable-background-timer-throttling",
+            ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+            if not self._attach():
+                self._teardown()
+                self._emit()
+                return
+            time.sleep(4)          # let the SPA render the channel + Join button
+            try:
+                self._eval(self._JOIN)
+            except Exception:
+                pass
+            self._start_poll()
+            self._emit()
+
+    def mute(self):
+        with self.lock:
+            try:
+                self._eval(self._MUTE)
+            except Exception:
+                pass
+            self._emit()
+
+    def leave(self):
+        with self.lock:
+            self._teardown()
+            self._emit()
+
+    def _teardown(self):
+        self._stop_poll()
+        if self.ws:
+            try:
+                self._eval(self._LEAVE)
+            except Exception:
+                pass
+            try:
+                self.ws.close()
+            except Exception:
+                pass
+            self.ws = None
+        self._kill_proc()
+        self.channel_id = None
+
+    # ---- state ----
+    def state(self):
+        with self.lock:
+            if not self.ws:
+                return {"type": "voicecall", "in_call": False, "muted": False, "channel": ""}
+            try:
+                s = self._eval(self._STATE) or {}
+            except Exception:
+                s = {}
+            return {"type": "voicecall", "in_call": bool(s.get("connected")),
+                    "muted": bool(s.get("muted")), "channel": self.channel_id or ""}
+
+    def _emit(self):
+        try:
+            self.on_state(self.state())
+        except Exception:
+            pass
+
+    def _start_poll(self):
+        self._stop_poll()
+        stop = threading.Event()
+        self._poll = stop
+
+        def loop():
+            while not stop.wait(2.0):
+                self._emit()
+        threading.Thread(target=loop, daemon=True).start()
+
+    def _stop_poll(self):
+        if self._poll:
+            self._poll.set()
+            self._poll = None
+
+
 class DQS:
     def __init__(self):
         self.token = load_token()
@@ -635,6 +822,7 @@ class DQS:
         self.play_proc = None     # ffplay process while a voice note plays in-line
         self.play_id = None       # message id being played (UI accents its pill)
         self.play_lock = threading.Lock()
+        self.voicecall = VoiceCall(self.broadcast)   # voice calls via hidden Helium/CDP
         self.gif_gen = 0          # newest gif-browser request; stale conversions bail
         self._gifv_busy = set()   # inline-gif conversions in flight (dest paths)
         self._upload_limit = None # Discord attachment cap (MB) for this account's Nitro tier; probed once
@@ -802,10 +990,15 @@ class DQS:
             gid = g["guild_id"]
             guild_muted = bool(g.get("muted"))
             for ch in g.get("channels", []):
-                if ch.get("type") not in TEXT_CHANNEL_TYPES:
+                ctype = ch.get("type")
+                if ctype in TEXT_CHANNEL_TYPES:
+                    kind = "channel"
+                elif ctype == 2:   # voice channel: surfaced so `v` can join it
+                    kind = "voice"
+                else:
                     continue
                 entries.append({
-                    "id": ch["id"], "name": ch.get("name", ""), "kind": "channel",
+                    "id": ch["id"], "name": ch.get("name", ""), "kind": kind,
                     "topic": ch.get("topic") or "", "unread": 0, "mention": False, "avatar": "", "workspace": gid,
                     "user": "",
                     # a muted guild silences all its channels
@@ -824,6 +1017,7 @@ class DQS:
         self.write(conn, self._workspaces_msg())
         self.write(conn, {"type": "users", "users": self.users_payload()})
         self.write(conn, self._channels_msg())
+        self.write(conn, self.voicecall.state())   # replay in-call state to (re)connecting UIs
         for ws in [DM_WS] + [g["guild_id"] for g in self.guilds]:
             if self._presence_snap:
                 self.write(conn, {"type": "presence", "workspace": ws, "all": self._presence_snap})
@@ -1820,6 +2014,12 @@ class DQS:
                 elif t == "play" and cmd.get("url"):
                     threading.Thread(target=self.play_audio,
                                      args=(conn, str(cmd.get("id") or "a"), cmd["url"], cmd.get("ext", "")), daemon=True).start()
+                elif t == "voiceJoin" and ch:
+                    threading.Thread(target=self.voicecall.join, args=(cmd.get("workspace"), ch), daemon=True).start()
+                elif t == "voiceLeave":
+                    threading.Thread(target=self.voicecall.leave, daemon=True).start()
+                elif t == "voiceMute":
+                    threading.Thread(target=self.voicecall.mute, daemon=True).start()
                 elif t == "playStop":
                     threading.Thread(target=self.play_stop, daemon=True).start()
                 elif t == "voiceStart" and ch:
