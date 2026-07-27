@@ -1204,7 +1204,10 @@ class DQS:
             r = fn(*fargs)
             print(f"dsqrd: {label} -> {'ok' if r else 'FAILED'} ({r!r})", flush=True)
             if not r:
-                self.broadcast({"type": "toast", "text": f"{act} failed — Discord rejected it (attachment too large?)"})
+                # the attachment-size guess only makes sense for a message send;
+                # for reactions etc. it's misleading (real reason is in the log).
+                hint = " (attachment too large?)" if act == "send" else ""
+                self.broadcast({"type": "toast", "text": f"{act} failed — Discord rejected it{hint}"})
         except Exception as e:
             print(f"dsqrd: {label} EXC {e!r}", flush=True)
             self.broadcast({"type": "toast", "text": f"{act} failed: {e}"})
@@ -1989,9 +1992,12 @@ class DQS:
                     threading.Thread(target=self._call, args=("delete", self.discord.delete_message, ch, cmd["ts"]), daemon=True).start()
                 elif t == "react" and ch and cmd.get("ts") and cmd.get("emoji"):
                     emoji = cmd["emoji"]
-                    if emoji in self.emoji_by_name:   # custom emoji → name:id
+                    eid = cmd.get("emojiId")
+                    if eid:                            # re-reacting to an existing custom
+                        emoji = f"{emoji}:{eid}"        # reaction: use its own id (may be external)
+                    elif emoji in self.emoji_by_name:  # custom emoji → name:id
                         emoji = f"{emoji}:{self.emoji_by_name[emoji][0]}"
-                    elif emoji in self.codemap:       # standard shortcode → unicode glyph
+                    elif emoji in self.codemap:        # standard shortcode → unicode glyph
                         emoji = self.codemap[emoji]
                     fn = self.discord.remove_reaction if cmd.get("remove") else self.discord.send_reaction
                     threading.Thread(target=self._call, args=("react", fn, ch, cmd["ts"], emoji), daemon=True).start()

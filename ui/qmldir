@@ -22,3 +22,4 @@ CopilotPanel CopilotPanel.qml
 IssuesPanel IssuesPanel.qml
 LinkPicker LinkPicker.qml
 VoiceBar VoiceBar.qml
+LinkPicker LinkPicker.qml

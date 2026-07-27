@@ -86,6 +86,7 @@ Item {
     // Default on for Discord (many servers, mostly-DMs usage); the rail stays for
     // anything that still wants it.
     property bool   railHidden: Quickshell.env("SLK_SOCK") === "dsqrd"
+    readonly property bool isSlack: Quickshell.env("SLK_SOCK") !== "dsqrd"
     property bool   hasThreads: true        // Slack has threads; Discord doesn't
     property string currentWorkspace: ""    // teamID being viewed
     readonly property string currentWorkspaceName: {
@@ -117,19 +118,36 @@ Item {
     property int _emojiSeq: 0
 
     // --- reactions ---
-    function react(channelId, ts, name, remove) {
-        safeWrite(JSON.stringify({ type: "react", channel: channelId, ts: ts, emoji: name, remove: !!remove }) + "\n")
+    function react(channelId, ts, name, remove, eid) {
+        const cmd = { type: "react", channel: channelId, ts: ts, emoji: name, remove: !!remove }
+        if (eid) cmd.emojiId = eid   // custom-emoji id: lets the daemon send name:id without indexing it
+        safeWrite(JSON.stringify(cmd) + "\n")
     }
     // Reacting with an emoji you already used removes it (toggle), else adds.
+    // Carry the reaction's own eid (custom-emoji id) so re-reacting to an
+    // external/nitro emoji already on the message resolves — the daemon can't
+    // look those up by name (they're not in your guilds → Unknown Emoji).
     function toggleReaction(msg, name) {
         if (!msg || !name) return
-        let mine = false
+        let mine = false, eid = ""
         try {
             const rx = JSON.parse(msg.reactionsJson || "[]")
-            for (let i = 0; i < rx.length; i++) if (rx[i].name === name && rx[i].mine) { mine = true; break }
+            for (let i = 0; i < rx.length; i++) if (rx[i].name === name) {
+                if (rx[i].mine) mine = true
+                if (rx[i].eid) eid = rx[i].eid
+                break
+            }
         } catch (e) {}
-        react(currentChannelId, msg.ts, name, mine)
+        react(currentChannelId, msg.ts, name, mine, eid)
     }
+    // Replay an app's Block Kit button (e.g. incident.io's page "Acknowledge").
+    // Daemon reconstructs the blocks.actions payload from the cached message and
+    // no-ops with a toast if this message carries no such button.
+    function ackIncident(msg) {
+        if (!msg) return
+        safeWrite(JSON.stringify({ type: "blockAction", channel: currentChannelId, ts: msg.ts, actionId: "ack" }) + "\n")
+    }
+
     // file:// path for a custom emoji by name (empty for standard/unknown) —
     // used to render reaction-row icons in the react picker.
     function emojiPath(name) { return (_emoji && _emoji[name]) || "" }
@@ -1471,21 +1489,21 @@ Item {
     function openLink(msg) {
         if (msg && msg.link) openUrl(msg.link)
     }
-    // Every URL in a message, in order, deduped — the daemon's `link` field only
-    // carries the first one, so the shell's multi-link chooser re-extracts from
-    // the text. Trailing punctuation is trimmed the way `link` consumers expect.
-    function extractLinks(msg) {
+    // Every URL in a message, in order, deduped. Mirrors richify's linkifier:
+    // labeled [text](url) links first, then bare URLs (matching punctuation
+    // trimming). Include the daemon's first-link field as a fallback when the
+    // rendered text does not contain the raw URL.
+    function allLinks(msg) {
         if (!msg) return []
-        const out = [], seen = ({})
-        const re = /https?:\/\/[^\s<>"')\]]+/g
-        const t = (msg.text || "") + "\n" + (msg.link || "")
-        let m
-        while ((m = re.exec(t)) !== null) {
-            const u = m[0].replace(/[.,;:!?]+$/, "")
-            if (u && !seen[u]) { seen[u] = true; out.push(u) }
-        }
+        var text = msg.text || "", out = [], seen = ({}), m
+        var re1 = /\[[^\]]+\]\((https?:\/\/[^\s)]+)\)/g
+        while ((m = re1.exec(text)) !== null) { if (!seen[m[1]]) { seen[m[1]] = 1; out.push(m[1]) } }
+        var re2 = /(https?:\/\/[^\s<]+?)([.,;:!?)]*)(?=\s|$)/g
+        while ((m = re2.exec(text)) !== null) { if (!seen[m[1]]) { seen[m[1]] = 1; out.push(m[1]) } }
+        if (msg.link && !seen[msg.link]) out.push(msg.link)
         return out
     }
+    function openLinks(urls) { for (var i = 0; i < urls.length; i++) openUrl(urls[i]) }
     function hasChannelRef(msg) {
         return !!(msg && msg.channelRef && _findChannel(msg.channelRef))
     }

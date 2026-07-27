@@ -96,14 +96,14 @@ FloatingWindow {
     function goTop()       { focusedPanel === "sidebar" ? sidebar.toTop()    : msgs.toTop() }
     function goBottom()    { focusedPanel === "sidebar" ? sidebar.toBottom() : msgs.toBottom() }
     function reactTo(msg)  { if (msg) { emojiPicker.target = msg; emojiPicker.show() } }
-    // `o`: a #channel mention or a single link keeps the instant-open behavior;
-    // several links pop the numbered chooser instead of silently opening the
-    // first one.
-    function openMsgLinks(msg) {
+    // o / O link opening. o: open one link (or #channel / image) directly,
+    // but a message with several links opens the picker. O opens every link.
+    function openMsgLinks(msg, all) {
         if (!msg) return
-        const links = Backend.extractLinks(msg)
-        if (links.length >= 2 && !Backend.hasChannelRef(msg)) linkPicker.show(links)
-        else Backend.openChannelRef(msg)
+        const links = Backend.allLinks(msg)
+        if (all) { Backend.openLinks(links); return }
+        if (links.length >= 2 && !Backend.hasChannelRef(msg)) { linkPicker.openFor(links); return }
+        Backend.openChannelRef(msg)
     }
     function askDelete(msg) { if (msg && msg.ts) { confirmDelete.target = msg; confirmDelete.ask(Backend.plainText(msg.text)) } }
     function activate() {
@@ -296,8 +296,10 @@ FloatingWindow {
             "D":        { act: () => { if (focusedPanel === "messages") askDelete(msgs.currentMessage()) }, help: "Delete your message", cat: "msg" },
             "S":        { act: () => { if (focusedPanel === "messages") Backend.downloadMedia(msgs.currentMessage()) }, help: "Save media", cat: "msg" },
             "r":        { act: () => { if (focusedPanel === "messages") reactTo(msgs.currentMessage()) }, help: "React", cat: "msg" },
+            "A":        { act: () => { if (Backend.isSlack && focusedPanel === "messages") Backend.ackIncident(msgs.currentMessage()) }, help: () => Backend.isSlack ? "Acknowledge (incident.io)" : "", cat: "msg" },
             "y":        { act: () => { if (focusedPanel === "messages") Backend.copyText(msgs.currentMessage()) }, help: "Copy text", cat: "msg" },
-            "o":        { act: () => { if (focusedPanel === "messages") win.openMsgLinks(msgs.currentMessage()) }, help: "Open link(s)", cat: "msg" },
+            "o":        { act: () => { if (focusedPanel === "messages") win.openMsgLinks(msgs.currentMessage(), false) }, help: "Open link", cat: "msg" },
+            "O":        { act: () => { if (focusedPanel === "messages") win.openMsgLinks(msgs.currentMessage(), true) }, help: "Open all links", cat: "msg" },
             "v":        { act: () => { if (focusedPanel === "sidebar") win.voiceSelected()
                                        else if (focusedPanel === "messages") Backend.viewImage(msgs.currentMessage()) },
                           help: () => win.isDiscord ? "Join/leave voice (on a voice channel) · view image" : "View image", cat: "msg" },
@@ -337,7 +339,8 @@ FloatingWindow {
                         help: () => Backend.railHidden ? "" : "DM author", cat: "msg" },
             "P":      { act: () => { const m = thread.currentMessage(); if (m && m.uid) Backend.openProfile(m.uid) },
                         help: () => "View profile", cat: "msg" },
-            "o":      { act: () => win.openMsgLinks(thread.currentMessage()), help: "Open link(s)", cat: "msg" },
+            "o":      { act: () => win.openMsgLinks(thread.currentMessage(), false), help: "Open link", cat: "msg" },
+            "O":      { act: () => win.openMsgLinks(thread.currentMessage(), true), help: "Open all links", cat: "msg" },
             "r":      { act: () => reactTo(thread.currentMessage()), help: "React", cat: "msg" },
             "y":      { act: () => Backend.copyText(thread.currentMessage()), help: "Copy text", cat: "msg" },
             "Y":      { act: () => Backend.copyLink(thread.currentMessage()), help: "Copy message link", cat: "msg" },
@@ -429,19 +432,18 @@ FloatingWindow {
             }
             e.accepted = true; return
         }
-        // Issue tracker / link chooser takeovers keep their shell-routed list
-        // controls. Shared QsLib modals instead own focus and keys themselves.
-        if (issuesPanel.open || linkPicker.open) {
-            const p = issuesPanel.open ? issuesPanel : linkPicker
-            if (e.key === Qt.Key_Escape || e.key === Qt.Key_Q) p.close()
-            else if (e.key === Qt.Key_J || e.key === Qt.Key_Down) p.move(1)
-            else if (e.key === Qt.Key_K || e.key === Qt.Key_Up) p.move(-1)
-            else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_O || e.key === Qt.Key_L) p.openCurrent()
-            else if (e.text >= "1" && e.text <= "9" && e.text.length === 1) p.openAt(parseInt(e.text) - 1)
+        // The issue tracker is a shell-routed takeover. Shared QsLib modals,
+        // including the link picker, own focus and keys themselves.
+        if (issuesPanel.open) {
+            if (e.key === Qt.Key_Escape || e.key === Qt.Key_Q) issuesPanel.close()
+            else if (e.key === Qt.Key_J || e.key === Qt.Key_Down) issuesPanel.move(1)
+            else if (e.key === Qt.Key_K || e.key === Qt.Key_Up) issuesPanel.move(-1)
+            else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_O || e.key === Qt.Key_L) issuesPanel.openCurrent()
+            else if (e.text >= "1" && e.text <= "9" && e.text.length === 1) issuesPanel.openAt(parseInt(e.text) - 1)
             e.accepted = true; return
         }
-        // Changelog, cheat sheet, and confirmations use the QsLib Modal scaffold;
-        // while one is open it owns focus and the shell never sees the event.
+        // Changelog, cheat sheet, confirmations, and the link picker use the
+        // QsLib Modal scaffold; while open they own focus and keyboard events.
         const id = keyId(e, ctrl)
         if (!id) return
         // a live voice recording claims enter (send) and esc (cancel) before anything else
@@ -902,13 +904,6 @@ FloatingWindow {
                 onOpenChanged: if (!open) win.backToNormal()
             }
 
-            // Link chooser for `o` on a message with several URLs.
-            LinkPicker {
-                id: linkPicker
-                z: 105
-                onOpenChanged: if (!open) win.backToNormal()
-            }
-
             // "What's new" before applying an update (#5). Shell-routed; opened
             // from the U keybind when the daemon supplied a changelog.
             ChangelogModal {
@@ -918,6 +913,14 @@ FloatingWindow {
                 fromRev: Backend.updateCurrent
                 toRev: Backend.updateLatest
                 onAccepted: { close(); Backend.applyUpdate() }
+                onOpenChanged: if (!open) win.backToNormal()
+            }
+
+            LinkPicker {
+                id: linkPicker
+                z: 105
+                onChosen: url => Backend.openUrl(url)
+                onChosenAll: Backend.openLinks(links)
                 onOpenChanged: if (!open) win.backToNormal()
             }
 
