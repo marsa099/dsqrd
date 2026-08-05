@@ -1,3 +1,7 @@
+# Fork archived
+
+This fork is no longer maintained. The important changes it was created to provide have now been implemented by the upstream [`daphen/dsqrd`](https://github.com/daphen/dsqrd) project, which should be used instead.
+
 # slqs & dsqrd — native Slack & Discord clients for Wayland
 
 Two keyboard-driven desktop chat clients that share one [Quickshell](https://quickshell.org) QML UI:
