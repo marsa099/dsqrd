@@ -1,5 +1,20 @@
 # slqs & dsqrd — native Slack & Discord clients for Wayland
 
+> **This is a fork of [daphen/dsqrd](https://github.com/daphen/dsqrd).**
+> It tracks upstream `main` and adds exactly three things:
+>
+> | | What |
+> |---|---|
+> | `dsqrd-cli` | Stdlib-only Python CLI over the daemon socket — `channels`, `messages`, `summary`, `open`, `send`. Reading uses only the side-effect-free `history` command, never `recent`/`focus`, so it never clobbers the UI's active-channel or notification state. ([upstream issue #8](https://github.com/daphen/dsqrd/issues/8)) |
+> | `open` command | Lets anything outside the client navigate the UI to a channel, reusing the same broadcast a clicked notification produces. ([upstream issue #9](https://github.com/daphen/dsqrd/issues/9)) |
+> | `flake.nix` | `DSQRD_UPDATE_REPO`/`DSQRD_UPSTREAM_REPO` so the in-app update badge tracks this fork *and* unmerged upstream commits, plus a `pgrep` fix that matches the installed daemon path rather than a bare `dsqrd.py` (an editor or agent session with the filename in its argv otherwise reads as a live daemon). |
+>
+> Everything else is upstream. The previous incarnation of this fork carried a
+> Copilot catch-up panel and an issues panel; both were dropped once daphen
+> shipped his own agent/summary feature. That history is preserved on the
+> [`archive/copilot-fork`](../../tree/archive/copilot-fork) branch.
+
+
 Two keyboard-driven desktop chat clients that share one [Quickshell](https://quickshell.org) QML UI:
 
 - **slqs** — Slack client. Go daemon.
