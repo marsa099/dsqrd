@@ -2421,29 +2421,94 @@ class DQS:
         self.read_conn(conn)
 
     def _check_update_once(self):
-        """One update check against the repo's main SHA. ETag-conditional, so a
-        304 (unchanged) is free against GitHub's 60/h unauthenticated limit."""
+        """Background poll: detect a newer build and push an `updateAvailable`
+        event, staying silent on errors / up-to-date. ETag-conditional, so a 304
+        (nothing moved) is free against GitHub's 60/h unauthenticated limit."""
         if not GIT_REV:
             return
         self._last_update_check = time.time()
-        api = "https://api.github.com/repos/daphen/dsqrd/commits/main"
         try:
-            headers = {"User-Agent": "dsqrd", "Accept": "application/vnd.github.sha"}
-            if self._update_etag:
-                headers["If-None-Match"] = self._update_etag
-            with urllib.request.urlopen(urllib.request.Request(api, headers=headers), timeout=15) as r:
-                self._update_etag = r.headers.get("ETag") or self._update_etag
-                latest = r.read().decode().strip()
-            if latest and latest != GIT_REV:
-                self.update_event = {"type": "updateAvailable",
-                                     "current": GIT_REV[:7], "latest": latest[:7],
-                                     "changelog": self._fetch_changelog(GIT_REV, latest)}
-                self.broadcast(self.update_event)
+            self._poll_update()
         except urllib.error.HTTPError as e:
             if e.code != 304:   # 304 = unchanged (ETag hit); anything else: retry next cycle
                 pass
         except Exception:
             pass
+
+    def _poll_update(self):
+        """Core check. Returns the sha to build toward, or None when current.
+
+        A fork signals on two legs: (1) our binary is behind the repo we build
+        from, or (2) upstream has commits we haven't merged yet — both are
+        things `update-dsqrd` resolves. One `compare` call answers both. A stock
+        build (no DSQRD_UPSTREAM_REPO) falls back to a plain main-SHA poll.
+
+        Checking `daphen/dsqrd` unconditionally, as a stock build does, is wrong
+        for a fork: our build sha only exists in the fork, so it never equals
+        upstream's tip and the badge latches on permanently."""
+        repo = os.environ.get("DSQRD_UPDATE_REPO", "daphen/dsqrd")
+        upstream = os.environ.get("DSQRD_UPSTREAM_REPO", "")
+        latest = (self._check_fork(repo, upstream)
+                  if upstream and upstream != repo else self._check_plain(repo))
+        if latest:
+            self._emit_update(latest)
+        elif self.update_event:
+            # The badge must be able to go away again. Without this, a single
+            # transient "behind" answer latches until the daemon restarts: the
+            # event is cached in self.update_event and replayed to every new
+            # client, so the UI keeps claiming an update long after the poll
+            # has started returning up-to-date.
+            self._clear_update()
+        return latest
+
+    def _gh(self, url, accept="application/vnd.github+json"):
+        """GET a GitHub API URL, ETag-conditional via self._update_etag. Returns
+        the sha string (sha media type) or parsed JSON; raises HTTPError(304)
+        when nothing changed since the last check."""
+        headers = {"User-Agent": "dsqrd", "Accept": accept}
+        if self._update_etag:
+            headers["If-None-Match"] = self._update_etag
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=15) as r:
+            self._update_etag = r.headers.get("ETag") or self._update_etag
+            body = r.read()
+        return body.decode().strip() if accept.endswith(".sha") else json.loads(body.decode())
+
+    def _check_plain(self, repo):
+        """Stock build: the target is the repo's main SHA if it differs from our
+        build, else None."""
+        latest = self._gh(f"https://api.github.com/repos/{repo}/commits/main",
+                          "application/vnd.github.sha")
+        return latest if latest and latest != GIT_REV else None
+
+    def _check_fork(self, repo, upstream):
+        """Fork build: one compare (our main .. upstream main) covers both legs —
+        base_commit is our fork main tip; ahead_by/commits is upstream's lead.
+        Returns the sha to build toward, or None when current on both legs."""
+        head = upstream.split("/")[0] + ":main"   # cross-repo head, e.g. daphen:main
+        cmp = self._gh(f"https://api.github.com/repos/{repo}/compare/main...{head}")
+        fork_tip = (cmp.get("base_commit") or {}).get("sha", "")
+        if fork_tip and fork_tip != GIT_REV:
+            return fork_tip                        # build the fork first
+        if cmp.get("ahead_by", 0) > 0:             # else: upstream has unmerged commits
+            commits = cmp.get("commits") or []
+            return commits[-1]["sha"] if commits else None
+        return None
+
+    def _emit_update(self, latest):
+        if self.update_event and self.update_event.get("latest") == latest[:7]:
+            return                                 # already announced this target
+        self.update_event = {"type": "updateAvailable",
+                             "current": GIT_REV[:7], "latest": latest[:7],
+                             "changelog": self._fetch_changelog(GIT_REV, latest)}
+        self.broadcast(self.update_event)
+
+    def _clear_update(self):
+        """Retract the badge. `latest: ""` is the signal — the UI keys its
+        boolean off a non-empty latest, so no new event type is needed and an
+        older UI simply shows an empty target instead of breaking."""
+        self.update_event = None
+        self.broadcast({"type": "updateAvailable", "current": GIT_REV[:7],
+                        "latest": "", "changelog": []})
 
     def _fetch_changelog(self, current, latest):
         """"What's new" entries between the running build and latest, via the
@@ -2451,7 +2516,8 @@ class DQS:
         (user-facing summaries); a range with none (pre-convention) falls back
         to commit subjects. Newest-first, cap 30. Best-effort: [] on failure."""
         try:
-            api = f"https://api.github.com/repos/daphen/dsqrd/compare/{current}...{latest}"
+            repo = os.environ.get("DSQRD_UPDATE_REPO", "daphen/dsqrd")
+            api = f"https://api.github.com/repos/{repo}/compare/{current}...{latest}"
             headers = {"User-Agent": "dsqrd", "Accept": "application/vnd.github+json"}
             with urllib.request.urlopen(urllib.request.Request(api, headers=headers), timeout=15) as r:
                 data = json.loads(r.read().decode())

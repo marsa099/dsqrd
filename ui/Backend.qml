@@ -1128,7 +1128,7 @@ Item {
         if (e.type === "message") ingest(e.channel, e.msg, e.thread, e.mention)
         else if (e.type === "replyCountInc") bumpReplyCount(e.channel, e.ts)
         else if (e.type === "workspaces") setWorkspaces(e.workspaces, e.rail, e.threads)
-        else if (e.type === "updateAvailable") { updateCurrent = e.current || ""; updateLatest = e.latest || ""; updateChangelog = e.changelog || []; updateAvailable = true }
+        else if (e.type === "updateAvailable") { updateCurrent = e.current || ""; updateLatest = e.latest || ""; updateChangelog = e.changelog || []; updateAvailable = updateLatest.length > 0 }
         else if (e.type === "prefs") { prefs = e.prefs || ({}); prefsLoaded() }
         else if (e.type === "users") { _usersByWs = e.users || ({}) }
         else if (e.type === "reaction") applyReaction(e.channel, e.ts, e.reactionsJson)
