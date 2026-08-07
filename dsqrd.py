@@ -2309,6 +2309,20 @@ class DQS:
                         # low-stakes and self-heals on next open, so a transient
                         # rejection must not toast. ack() already retries 5xx.
                         threading.Thread(target=self.discord.ack, args=(ch, str(before)), daemon=True).start()
+                elif t == "open" and ch:
+                    # Deep-link from outside the client: navigate the UI to a
+                    # channel, exactly as a clicked notification does. Reuses
+                    # the same broadcast as _on_notif_activate, so there is no
+                    # second navigation path to keep in sync.
+                    #
+                    # Deliberately does NOT touch self.active_ch — that is the
+                    # daemon's belief about what the UI is *showing*, used to
+                    # suppress notifications. The UI sets it via "recent" once
+                    # it has actually switched, which is the only moment it is
+                    # true. Setting it here would suppress notifications for a
+                    # channel nobody has opened yet.
+                    self.broadcast({"type": "open", "workspace": cmd.get("workspace") or "",
+                                    "channel": ch, "thread": cmd.get("thread") or ""})
                 elif t == "typing" and ch:
                     threading.Thread(target=self.discord.send_typing, args=(ch,), daemon=True).start()
                 elif t == "view" and (cmd.get("images") or cmd.get("url")):
