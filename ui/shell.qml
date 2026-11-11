@@ -15,6 +15,20 @@ FloatingWindow {
     implicitWidth: 1180
     implicitHeight: 760
 
+    // Closing a FloatingWindow hides it without stopping Quickshell. Let the
+    // launcher reopen that same window instead of spawning another instance.
+    IpcHandler {
+        target: "window"
+
+        function openWindow(): bool {
+            // A compositor close can leave the proxy's visible property true
+            // even though the native window is gone. Reset it before showing.
+            win.visible = false
+            win.visible = true
+            return true
+        }
+    }
+
     // Keycap chip + muted label — canonical QsLib family components,
     // re-derived locally only to bake in the row anchoring.
     component StatusCap: Lib.KeyCap {

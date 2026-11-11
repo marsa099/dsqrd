@@ -49,8 +49,6 @@
           export SLK_MEDIA_VIEWER="${daemon}/share/dsqrd/media-viewer.sh"
           sock="$XDG_RUNTIME_DIR/dsqrd.sock"
 
-          # a UI is already up (window stays mapped in this app — jump-or-exec
-          # handles focus): a second one is never wanted
           # serialize the daemon aliveness check + spawn: concurrent launches
           # used to each see "no daemon" and spawn duplicates
           exec 9>"$XDG_RUNTIME_DIR/dsqrd-launch.lock"
@@ -73,9 +71,10 @@
           fi
           for _ in $(seq 1 300); do [ -S "$sock" ] && break; sleep 0.1; done
 
-          # single-instance UI — checked AFTER the daemon health pass, so the
-          # launcher can revive a dead daemon while a window is still up
-          if pgrep -f "quickshell.* -p .*share/dsqrd/ui" >/dev/null 2>&1; then
+          # Reopen the existing window AFTER the daemon health pass. Quickshell
+          # can return exit code 0 even for "Target not found", so require the
+          # handler's explicit acknowledgement rather than just a successful exit.
+          if reply=$(timeout 2s qs ipc -p "${daemon}/share/dsqrd/ui" call window openWindow 2>/dev/null) && [ "$reply" = true ]; then
             exit 0
           fi
           # close the launch lock for qs — an inherited fd 9 holds the lock
