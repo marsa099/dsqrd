@@ -37,6 +37,13 @@ Item {
     property string currentChannel: ""     // display name of the open channel
     property string currentChannelId: ""   // wire key (globally-unique Slack id)
     property string currentTopic: ""
+    property string authState: Quickshell.env("SLK_SOCK") === "dsqrd" ? "connecting" : "signedIn"
+    property string authQrPath: ""
+    property string authAccount: ""
+    property string authMessage: ""
+    property int authRemaining: 0
+    function startAuth() { safeWrite(JSON.stringify({ type: "startAuth" }) + "\n") }
+    function cancelAuth() { safeWrite(JSON.stringify({ type: "cancelAuth" }) + "\n") }
     property bool   typing: false
     property string typingWho: ""
     property bool   threadTyping: false
@@ -55,6 +62,9 @@ Item {
     // no `prefs` event, so slqs stays in-memory). The daemon replays `prefs` on
     // bootstrap; prefsLoaded() lets shell.qml apply sidebar/recents/last channel.
     property var prefs: ({})
+    property var hiddenMessageIds: ({})
+    property var shownMessageIds: ({})
+    property var hiddenTextFilters: []
     signal prefsLoaded()
 
     // Voice call (dsqrd): a hidden Helium hosts the call; the daemon reports state.
@@ -62,6 +72,59 @@ Item {
     property bool callMuted: false
     property string callChannel: ""
     function savePrefs(patch) { safeWrite(JSON.stringify({ type: "savePrefs", prefs: patch }) + "\n") }
+    function _hiddenKey(channel, ts) { return channel + ":" + ts }
+    function _persistHidden() {
+        const patch = {
+            hiddenMessageIds: hiddenMessageIds,
+            shownMessageIds: shownMessageIds,
+            hiddenTextFilters: hiddenTextFilters
+        }
+        prefs = Object.assign({}, prefs, patch)
+        savePrefs(patch)
+    }
+    function _matchesHiddenText(text) {
+        const haystack = (text || "").toLowerCase()
+        for (let i = 0; i < hiddenTextFilters.length; i++)
+            if (haystack.indexOf(hiddenTextFilters[i].toLowerCase()) >= 0) return true
+        return false
+    }
+    function messageHidden(ts, text) {
+        if (isSlack || !ts) return false
+        const key = _hiddenKey(currentChannelId, ts)
+        return hiddenMessageIds[key] === true
+            || (_matchesHiddenText(text) && shownMessageIds[key] !== true)
+    }
+    function toggleMessageHidden(msg) {
+        if (isSlack || !msg || !msg.ts) return
+        const key = _hiddenKey(currentChannelId, msg.ts)
+        const hidden = messageHidden(msg.ts, msg.text)
+        const ids = Object.assign({}, hiddenMessageIds)
+        const shown = Object.assign({}, shownMessageIds)
+        if (hidden) { delete ids[key]; shown[key] = true }
+        else { ids[key] = true; delete shown[key] }
+        hiddenMessageIds = ids
+        shownMessageIds = shown
+        _persistHidden()
+        reflowList()
+        toast(hidden ? "Message shown" : "Message hidden")
+    }
+    function toggleHiddenTextFilter(text) {
+        const value = (text || "").trim()
+        if (isSlack || value.length === 0) return false
+        const filters = hiddenTextFilters.slice()
+        const lower = value.toLowerCase()
+        let found = -1
+        for (let i = 0; i < filters.length; i++)
+            if (filters[i].toLowerCase() === lower) { found = i; break }
+        if (found >= 0) filters.splice(found, 1)
+        else filters.push(value)
+        hiddenTextFilters = filters
+        if (found < 0) shownMessageIds = ({})
+        _persistHidden()
+        reflowList()
+        toast(found >= 0 ? "Text filter removed" : "Matching messages hidden")
+        return true
+    }
     // `U` → run the host's apply command. Detect-only: the app never self-updates;
     // SLK_UPDATE_CMD is the host's "apply" step (local merge/install/restart or
     // flake rebuild). Runs via `sh -c` so hosts can supply their own workflow.
@@ -80,6 +143,8 @@ Item {
     // anything that still wants it.
     property bool   railHidden: Quickshell.env("SLK_SOCK") === "dsqrd"
     readonly property bool isSlack: Quickshell.env("SLK_SOCK") !== "dsqrd"
+    readonly property string messageActionCommand: Quickshell.env("DSQRD_MESSAGE_ACTION")
+    readonly property bool messageActionEnabled: railHidden && messageActionCommand.length > 0
     property bool   hasThreads: true        // Slack has threads; Discord doesn't
     property string currentWorkspace: ""    // teamID being viewed
     readonly property string currentWorkspaceName: {
@@ -144,6 +209,12 @@ Item {
     // file:// path for a custom emoji by name (empty for standard/unknown) —
     // used to render reaction-row icons in the react picker.
     function emojiPath(name) { return (_emoji && _emoji[name]) || "" }
+    function emojiLabel(name) {
+        if (!name) return "emoji"
+        if (name[0] === ":" && name[name.length - 1] === ":") return name.slice(1, -1)
+        for (const key in _codemap) if (_codemap[key] === name) return key.slice(1, -1)
+        return name
+    }
 
     // Who-reacted, fetched on demand (Discord sends no reactor list at all; Slack
     // truncates it). ts -> { emojiName: [displayNames] }.
@@ -167,7 +238,7 @@ Item {
         const byName = {}
         const rs = reactions || []
         for (let i = 0; i < rs.length; i++) byName[rs[i].name] = rs[i].users || []
-        const m = _reactors; m[ts] = byName; _reactors = m
+        const m = Object.assign({}, _reactors); m[ts] = byName; _reactors = m
         reactorsReady(ts)
     }
     // Unfollow a thread from the Threads view: tell slkd, and drop it locally
@@ -374,10 +445,10 @@ Item {
         // Discord custom emoji <:name:id> / <a:name:id> (escaped to &lt;…&gt;
         // above) → inline CDN image. The id alone yields the URL.
         s = s.replace(/&lt;(a?):(\w+):(\d+)&gt;/g, (m, anim, name, id) =>
-            '<img src="https://cdn.discordapp.com/emojis/' + id + (anim ? '.gif' : '.png') + '?size=128" width="' + ep + '" height="' + ep + '">')
+            '<a href="emoji:' + name + '"><img src="https://cdn.discordapp.com/emojis/' + id + (anim ? '.gif' : '.png') + '?size=128" width="' + ep + '" height="' + ep + '"></a>')
         s = s.replace(/:([a-z0-9_+'\-]+):/g, (m, name) => {
             const p = _emoji[name]
-            return p ? '<img src="' + p + '" width="' + ep + '" height="' + ep + '">' : m
+            return p ? '<a href="emoji:' + name + '"><img src="' + p + '" width="' + ep + '" height="' + ep + '"></a>' : m
         })
         // Blockquotes: a leading "> " (escaped to "&gt; ") → muted text with a bar.
         s = s.replace(/(^|\n)&gt;[ \t]?([^\n]*)/g, '$1<font color="' + cssHex(Theme.fg_muted) + '">▎&#160;$2</font>')
@@ -409,8 +480,8 @@ Item {
         function glyph(t) { t = (t || "").trim(); if (t) out.push({ glyph: t }) }
         while ((m = re.exec(s)) !== null) {
             glyph(s.slice(last, m.index))
-            if (m[3]) out.push({ img: "https://cdn.discordapp.com/emojis/" + m[3] + (m[1] === "a" ? ".gif" : ".png") + "?size=128" })
-            else { const p = _emoji[m[4]]; p ? out.push({ img: p }) : out.push({ glyph: m[0] }) }
+            if (m[3]) out.push({ img: "https://cdn.discordapp.com/emojis/" + m[3] + (m[1] === "a" ? ".gif" : ".png") + "?size=128", name: m[2] })
+            else { const p = _emoji[m[4]]; p ? out.push({ img: p, name: m[4] }) : out.push({ glyph: m[0] }) }
             last = re.lastIndex
         }
         glyph(s.slice(last))
@@ -916,7 +987,6 @@ Item {
         m.grouped = last ? _grp(last, m) : false
         arr.push(m)
         messagesModel.append(m)
-        reflowList()
     }
     // Thread flavor of the same: append a pending reply to the open thread
     // instantly; the echo swaps into its slot below.
@@ -962,7 +1032,6 @@ Item {
                 if (id === currentChannelId) {
                     for (let j = 0; j < messagesModel.count; j++)
                         if (messagesModel.get(j).ts === optTs) { messagesModel.set(j, msg); break }
-                    reflowList()   // swapped an item in place → re-flow so date dividers don't go stale
                 }
                 return true
             }
@@ -996,28 +1065,64 @@ Item {
         const t = plainText(msg.text).replace(/<a?:([A-Za-z0-9_]+):\d+>/g, ":$1:")
         if (t.length) { Quickshell.execDetached(["wl-copy", "--", t]); copiedTs = msg.ts; copiedClear.restart() }
     }
-    // Y: copy a link to the message. Both link shapes are constructible locally —
-    // Slack archives URLs from the workspace subdomain (in the workspaces payload),
-    // Discord from guild/channel/message ids.
+    function messageLink(msg) {
+        if (!msg || !msg.ts) return ""
+        if (railHidden)
+            return "https://discord.com/channels/" + (currentWorkspace || "@me") + "/" + currentChannelId + "/" + msg.ts
+        let sub = ""
+        for (let i = 0; i < workspaces.length; i++)
+            if (workspaces[i].id === currentWorkspace) { sub = workspaces[i].subdomain || ""; break }
+        if (!sub) return ""
+        let url = "https://" + sub + ".slack.com/archives/" + currentChannelId + "/p" + msg.ts.replace(".", "")
+        if (threadOpen && threadParentTs && msg.ts !== threadParentTs)
+            url += "?thread_ts=" + threadParentTs + "&cid=" + currentChannelId
+        return url
+    }
+
     function copyLink(msg) {
-        if (!msg || !msg.ts) return
-        let url = ""
-        if (railHidden) {
-            url = "https://discord.com/channels/" + (currentWorkspace || "@me") + "/" + currentChannelId + "/" + msg.ts
-        } else {
-            let sub = ""
-            for (let i = 0; i < workspaces.length; i++)
-                if (workspaces[i].id === currentWorkspace) { sub = workspaces[i].subdomain || ""; break }
-            if (!sub) { toast("Couldn't build link (no workspace subdomain)"); return }
-            url = "https://" + sub + ".slack.com/archives/" + currentChannelId + "/p" + msg.ts.replace(".", "")
-            // reply permalinks need the thread context to resolve in Slack
-            if (threadOpen && threadParentTs && msg.ts !== threadParentTs)
-                url += "?thread_ts=" + threadParentTs + "&cid=" + currentChannelId
-        }
+        const url = messageLink(msg)
+        if (!url) { toast("Couldn't build message link"); return }
         Quickshell.execDetached(["wl-copy", "--", url])
         copiedTs = msg.ts
         copiedClear.restart()
         toast("Link copied")
+    }
+
+    function messageActionPayload(msg) {
+        let attachments = [], reactions = []
+        try { attachments = JSON.parse(msg.imagesJson || "[]") } catch (_) {}
+        try { reactions = JSON.parse(msg.reactionsJson || "[]") } catch (_) {}
+        return {
+            schema: "dsqrd.message-action.v1",
+            workspace: { id: currentWorkspace || "@me" },
+            channel: { id: currentChannelId, name: currentChannel || "" },
+            message: {
+                id: String(msg.ts || ""),
+                author: { id: String(msg.uid || ""), name: msg.author || "" },
+                text: plainText(msg.text || ""),
+                day: msg.day || "",
+                time: msg.time || "",
+                mine: !!msg.mine,
+                edited: !!msg.edited,
+                subtype: msg.subtype || "",
+                threadId: msg.thread_ts || "",
+                channelReference: msg.channelRef || "",
+                reply: (msg.replyAuthor || msg.replyText || msg.replyToTs) ? {
+                    id: String(msg.replyToTs || ""),
+                    author: msg.replyAuthor || "",
+                    text: plainText(msg.replyText || "")
+                } : null,
+                attachments: attachments,
+                reactions: reactions,
+                permalink: messageLink(msg)
+            }
+        }
+    }
+
+    function runMessageAction(msg) {
+        if (!messageActionEnabled || !msg) return
+        Quickshell.execDetached([messageActionCommand, JSON.stringify(messageActionPayload(msg))])
+        toast("Message action started")
     }
     // A deleted message (echoed back over the websocket) — drop it everywhere.
     function applyDelete(channelId, ts) {
@@ -1129,14 +1234,31 @@ Item {
         else if (e.type === "replyCountInc") bumpReplyCount(e.channel, e.ts)
         else if (e.type === "workspaces") setWorkspaces(e.workspaces, e.rail, e.threads)
         else if (e.type === "updateAvailable") { updateCurrent = e.current || ""; updateLatest = e.latest || ""; updateChangelog = e.changelog || []; updateAvailable = updateLatest.length > 0 }
-        else if (e.type === "prefs") { prefs = e.prefs || ({}); prefsLoaded() }
+        else if (e.type === "prefs") {
+            prefs = e.prefs || ({})
+            hiddenMessageIds = Object.assign({}, prefs.hiddenMessageIds || ({}))
+            shownMessageIds = Object.assign({}, prefs.shownMessageIds || ({}))
+            hiddenTextFilters = (prefs.hiddenTextFilters || []).slice()
+            prefsLoaded()
+            reflowList()
+        }
         else if (e.type === "users") { _usersByWs = e.users || ({}) }
+        else if (e.type === "auth") {
+            authState = e.state || "signedOut"
+            if (e.qr) authQrPath = e.qr
+            else if (authState === "signedOut" || authState === "error" || authState === "signedIn") authQrPath = ""
+            if (e.account) authAccount = e.account
+            else if (authState === "signedOut" || authState === "error" || authState === "signedIn") authAccount = ""
+            authMessage = e.message || ""
+            authRemaining = e.remaining || 0
+        }
         else if (e.type === "reaction") applyReaction(e.channel, e.ts, e.reactionsJson)
         else if (e.type === "images") applyImages(e.channel, e.ts, e.imagesJson)
         else if (e.type === "delete") applyDelete(e.channel, e.ts)
         else if (e.type === "browse") { browseResults = e.channels || []; browseLoaded() }
         else if (e.type === "toast") { if (e.text) toast(e.text) }
-        else if (e.type === "summary") { summaryText = e.text || ""; lastSummaryText = summaryText; lastSummaryChannel = currentChannel; lastSummaryScope = aiScope; lastSummaryUser = aiUser; summaryLoading = false; summaryTimeout.stop(); summaryReady() }
+        else if (e.type === "summary") { summaryText = e.text || ""; summaryCoverage = e.coverage || ""; lastSummaryText = summaryText; lastSummaryChannel = e.channelName || currentChannel; lastSummaryCoverage = summaryCoverage; lastSummaryScope = aiScope; lastSummaryUser = aiUser; summaryLoading = false; summaryTimeout.stop(); summaryReady() }
+        else if (e.type === "summaryProgress") { if (summaryLoading) summaryTimeout.restart() }
         else if (e.type === "answer") { summaryText = e.text || ""; summaryLoading = false; summaryTimeout.stop(); answerReady(e.question || "") }
         else if (e.type === "summaryError") { summaryLoading = false; summaryTimeout.stop(); if (e.text) toast(e.text) }
         else if (e.type === "summarizeSetup") { summaryLoading = false; summaryTimeout.stop(); summarizeClis = e.clis || []; summarizeSetupNeeded() }
@@ -1292,10 +1414,14 @@ Item {
         }
     }
 
-    // Tell slkd what channel we're viewing so it suppresses notifications for
-    // it while the window is focused (slkd tracks focus via niri's event stream).
+    // Tell the daemon exactly what the UI is showing and whether this app owns
+    // keyboard focus, so only messages already visible to the user stay silent.
     function sendFocus() {
-        safeWrite(JSON.stringify({ type: "focus", channel: (threadsView || mentionsView) ? "" : currentChannelId }) + "\n")
+        safeWrite(JSON.stringify({
+            type: "focus",
+            channel: (threadsView || mentionsView) ? "" : currentChannelId,
+            active: Qt.application.state === Qt.ApplicationActive
+        }) + "\n")
     }
 
     // Open a focused message's first image in the custom media viewer (same
@@ -1799,8 +1925,10 @@ Item {
     // in-scope messages and run them through the user-configured provider. The
     // result arrives async as a "summary" event (or an error toast).
     property string summaryText: ""
+    property string summaryCoverage: ""
     property string lastSummaryText: ""      // most recent summary this session — ⇧C reopens it
     property string lastSummaryChannel: ""   // its channel name, for the modal subtitle
+    property string lastSummaryCoverage: ""
     property string lastSummaryScope: ""     // the range that produced it, for follow-ups
     property string lastSummaryUser: ""
     property string aiScope: ""              // range of the in-flight summarize/ask; follow-ups reuse it
@@ -1826,6 +1954,14 @@ Item {
         summaryLoading = true   // drives the button spinner + the badge above the composer
         summaryTimeout.restart()
         safeWrite(JSON.stringify({ type: "summarize", channel: currentChannelId, scope: scope, user: user || "" }) + "\n")
+    }
+    function summarizeTopic(topic) {
+        if (!currentChannelId || summaryLoading || !topic.trim().length) return
+        aiScope = "last_week"; aiUser = ""
+        aiBusyLabel = "Summarizing “" + topic + "”…"
+        summaryLoading = true
+        summaryTimeout.restart()
+        safeWrite(JSON.stringify({ type: "summarize", channel: currentChannelId, scope: "last_week", topic: topic.trim() }) + "\n")
     }
     // Ask a free-text question about the chosen scope's messages (Discord agent menu).
     function ask(scope, user, question) {

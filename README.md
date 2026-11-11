@@ -1,4 +1,4 @@
-# slqs & dsqrd — native Slack & Discord clients for Wayland
+# dsqrd — keyboard-driven Discord for Wayland
 
 > **This is a fork of [daphen/dsqrd](https://github.com/daphen/dsqrd).**
 > This fork adds a non-Nix install/update path with automatic upstream merges,
@@ -21,47 +21,58 @@
 > [`archive/copilot-fork`](../../tree/archive/copilot-fork) branch.
 
 
-Two keyboard-driven desktop chat clients that share one [Quickshell](https://quickshell.org) QML UI:
+`dsqrd` is a native-feeling Discord desktop client built with a Python daemon
+and a Quickshell/QML interface. It is designed for fast keyboard navigation,
+compact message browsing, desktop notifications, media handling, and optional
+conversation summaries.
 
-- **slqs** — Slack client. Go daemon.
-- **dsqrd** — Discord client. Python daemon, built on endcord's `dchat` (gateway / REST / token store).
+> [!WARNING] dsqrd is an unofficial client. It uses Discord's private gateway
+> and REST APIs, which may change without notice and may be subject to Discord's
+> terms. Expect occasional breakage.
 
-Each app is a small **daemon** that owns the network connection (websocket/gateway + REST), caches messages in SQLite, and pushes events to the **shared QML UI** over a Unix socket. The UI is a thin, vim-style renderer — `j/k` move, `i` insert/reply, `o` open link or mentioned channel, `v` view media, `r` react.
+## Features
 
-## What these are
+- Guild channels and direct messages
+- Live gateway updates and recent-message history
+- Send, reply, edit, delete, and react to messages
+- Upload files, paste images, and record voice notes
+- Open or save images, videos, GIFs, and attachments
+- Threads, mentions, profiles, presence, mute controls, and voice channels
+- Actionable desktop notifications
+- Optional conversation summaries and follow-up questions
+- Vim-style navigation with an in-app keybinding reference
+- QR-code authentication through the official Discord mobile app
 
-Personal clients that log in with your **own session token** (Slack: `xoxc` token + `d` cookie; Discord: user token) and speak the services' **internal web/gateway APIs** — the same ones the official web clients use — rather than the public bot/app APIs. Those internal APIs are undocumented and change without notice, so expect occasional breakage.
-
-Built for **Linux + Wayland** — the [niri](https://github.com/YaLTeR/niri) compositor and Quickshell — with paths hard-coded to the author's layout (`~/personal/...`, `~/.config/niri/scripts/...`). Not portable to macOS or Windows.
+Press `?` in the app to open the current keybinding reference. The help view is
+generated from the real keymap, so it remains authoritative as bindings change.
 
 ## Architecture
 
+```text
+Discord gateway + REST API
+            │
+            ▼
+  Python daemon (dsqrd.py)
+            │  newline-delimited JSON over $XDG_RUNTIME_DIR/dsqrd.sock
+            ▼
+     Quickshell/QML UI
 ```
-  Slack/Discord  ──ws+REST──►  daemon  ──unix socket (JSON lines)──►  Quickshell UI
-                               (cache.db,                            (slk-gui-proto/*.qml)
-                                notifications,
-                                presence)
-```
 
-- **Daemon** (`slqs` binary / `dsqrd.py`): one persistent websocket/gateway connection, a SQLite cache, desktop notifications (dbus), and presence. Headless — no display needed.
-- **UI**: a single Quickshell config launched twice — once per app, distinguished by `SLK_SOCK` (`slqs` vs `dsqrd`). It connects to the daemon's socket and renders. The UI is developed in `~/personal/slk-gui-proto/` and **vendored** into each repo's `ui/` via `sync-ui.sh`.
-- **Launch / focus**: `~/.config/niri/scripts/launch-slack-client` / `launch-discord-client` ensure the daemon is running, reap stale UI instances, then `exec qs -p ~/personal/slk-gui-proto`.
+The daemon owns authentication, gateway state, REST requests, notifications,
+uploads, media conversion, and the Unix socket. The QML process owns rendering,
+keyboard interaction, and local UI state. Keeping those responsibilities
+separate allows the daemon to remain connected if the interface is restarted.
 
-## Dependencies
+Compositor-specific launch, focus, and placement policy is intentionally outside
+this repository. The packaged client starts one daemon and one UI instance but
+does not depend on a particular Wayland compositor.
 
-### Shared (runtime)
-| Dependency | Used for |
-|---|---|
-| **Quickshell** (pulls in **Qt 6**) | the UI |
-| **niri** (Wayland compositor) | launch/focus scripts call `niri msg`; window placement |
-| **dbus + a notification server** (your Quickshell bar, or mako/dunst) | desktop notifications |
-| **swayidle** | presence (active/away → gates phone notifications) |
-| **wl-clipboard** (`wl-copy` / `wl-paste`) | paste/copy images |
-| **imv** + **mpv** | viewing images/video (`v`), via `~/.config/endcord/media-viewer.sh` |
+## Requirements
 
-### slqs (Slack)
-- **Go** (build-time). Produces a self-contained binary; all libraries (slack-go, gorilla/websocket, godbus, esiqveland/notify, …) are compiled in. Uses **pure-Go SQLite** (`modernc.org/sqlite`) — no system SQLite, no cgo.
-- Runtime: the binary + the shared deps (dbus for notifications).
+The Nix package provides the application runtime, including Python libraries,
+Quickshell, FFmpeg, ImageMagick, Secret Service tooling, `mpv`, and `imv`. A
+Linux Wayland session and a working Secret Service implementation are still
+required.
 
 ### Arch / non-Nix installation and updates (this fork)
 
@@ -158,62 +169,104 @@ python3 -m unittest discover -s tests -v
 python3 tests/test_window_reopen.py ~/.local/bin/dsqrd-client
 ```
 
-### dsqrd (Discord)
-- **Nix** — `run-dsqrd.sh` launches it via `nix-shell shell.nix`.
-- **Python 3** + (from `shell.nix`): `pysocks`, `websocket-client`, `filetype`, `protobuf`, `jeepney`.
-- **notify-send** (notification fallback) and, optionally, **secret-tool** (keyring for the token).
+### Python dependencies
 
-## Build & install
+The main Python dependencies (installed automatically by the local installer) are:
 
-**1. Install the shared deps** (adjust for your distro): `quickshell`, `niri`, `swayidle`, `wl-clipboard`, `imv`, `mpv`, a notification daemon — plus **Go** (for slqs) and **Nix** (for dsqrd).
+- `websocket-client`
+- `pysocks`
+- `filetype`
+- `protobuf`
+- `jeepney`
+- `pycryptodome`
+- `qrcode`
+- `pillow`
 
-**2. slqs**
+## Run with Nix
+
+Run the current checkout:
+
 ```sh
-cd ~/personal/slqs
-go build -o slqs .        # self-contained binary, no system libs
+git clone https://github.com/daphen/dsqrd.git
+cd dsqrd
+nix run .
 ```
 
-**3. dsqrd** — no build step:
+Build without launching:
+
 ```sh
-cd ~/personal/dsqrd
-./run-dsqrd.sh            # nix-shell pulls the Python env, then runs dsqrd.py
+nix build .#dsqrd
+nix build .#dsqrd-client
 ```
 
-**4. UI** — both apps load `~/personal/slk-gui-proto/`. After editing it, run `./sync-ui.sh` to vendor it into `slqs/ui/` and `dsqrd/ui/`.
+The default package is `dsqrd-client`, which:
 
-**5. Media viewer** — `v` expects `~/.config/endcord/media-viewer.sh` (routes images to `imv`, video to `mpv`).
+1. Starts the daemon if it is not already healthy.
+1. Waits for `$XDG_RUNTIME_DIR/dsqrd.sock`.
+1. Reuses an existing UI instead of launching a duplicate.
+1. Starts the packaged Quickshell interface when needed.
+
+For source-only daemon development, `./run-dsqrd.sh` enters the legacy
+`shell.nix` environment and runs `dsqrd.py`. The flake remains the complete and
+preferred runtime.
 
 ## Authentication
 
-You provide your own session token; storage locations:
+On first launch, dsqrd displays a QR code. Scan it with the official Discord
+mobile app and approve the login there. The daemon stores the resulting session
+in Secret Service; credentials are never exposed to QML.
 
-- **slqs (Slack)** — per-workspace files at `~/.local/share/slqs/tokens/<teamID>.json`:
-  ```json
-  { "access_token": "xoxc-…", "cookie": "<value of the `d` cookie>" }
-  ```
-  Both come from a logged-in Slack **web** session.
+An existing endcord-compatible `~/.config/dsqrd/profiles.json` is accepted as a
+compatibility fallback, but QR authentication with Secret Service storage is the
+supported path.
 
-- **dsqrd (Discord)** — read from the system keyring (via `secret-tool`) or plaintext `~/.config/dsqrd/profiles.json` (endcord-compatible):
-  ```json
-  { "selected": "me", "profiles": [ { "name": "me", "token": "…" } ] }
-  ```
+## Data and configuration
 
-These are credentials — keep the files private.
+| Path                            | Purpose                                                  |
+| ------------------------------- | -------------------------------------------------------- |
+| `$XDG_RUNTIME_DIR/dsqrd.sock`   | Daemon-to-UI socket                                      |
+| `~/.local/share/dsqrd/`         | Writable application data and preferences                |
+| `~/.cache/dsqrd/`               | Avatars, previews, and temporary viewed media            |
+| `~/.config/dsqrd/profiles.json` | Compatibility profile and optional summary configuration |
+| `/tmp/dsqrd.log`                | Daemon output when started by the packaged launcher      |
 
-## Running
+Viewed media is cached under `~/.cache/dsqrd/view`; use the explicit save action
+for files that should be kept.
 
-- **Open a client**: run the niri launch script (or bind it). It starts the daemon if needed and opens the UI.
-- **Presence** (so your phone stays quiet while you're at the desk): swayidle drives `~/.config/niri/scripts/set-presence` — e.g. in `config.kdl`:
-  ```kdl
-  spawn-at-startup "swayidle" "-w" \
-    "timeout" "300" "~/.config/niri/scripts/set-presence idle" \
-    "resume" "~/.config/niri/scripts/set-presence active"
-  ```
-  slqs holds Slack "active" with a websocket `tickle` (the deprecated `users.setActive` is a no-op); dsqrd toggles the gateway `afk` flag. On idle they report away so mobile push resumes.
+## Optional integrations
 
-## Notes
+### Conversation summaries
 
-- Internal APIs are undocumented and change without notice; some breakage is expected.
-- Hard-coded paths assume `~/personal/{slqs,dsqrd,slk-gui-proto}` and `~/.config/niri/scripts`.
-- Desktop notifications need a running dbus notification server; the daemon's dbus connection self-heals (reconnects) on failure.
-- Slack mobile-push suppression depends on Slack's `push_idle_wait` being non-zero (it's the "send to mobile after N minutes idle" setting).
+The catch-up menu can use an installed command-line provider or a configured API
+provider. The first use opens an in-app setup flow and stores its choice in the
+`summarize` block of `~/.config/dsqrd/profiles.json`.
+
+### Custom message actions
+
+Set `DSQRD_MESSAGE_ACTION` to expose an additional action for the selected
+message. See [`docs/custom-message-actions.md`](docs/custom-message-actions.md)
+for the versioned JSON payload contract.
+
+## Development
+
+Useful checks before submitting a change:
+
+```sh
+python -m py_compile dsqrd.py
+nix build .#dsqrd
+nix build .#dsqrd-client
+```
+
+The application code is organized as:
+
+- `dsqrd.py` — daemon, socket protocol, Discord operations, and media handling
+- `dchat/` — gateway, authentication, token storage, and protocol helpers
+- `ui/` — the packaged Quickshell interface
+- `flake.nix` — reproducible daemon and client packages
+- `tests/` — focused authentication tests
+
+## License and attribution
+
+The Discord protocol layer began from endcord's `dchat` implementation and has
+since been adapted for dsqrd's daemon and UI protocol. Check dependency sources
+and file headers for their applicable licenses.

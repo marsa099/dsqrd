@@ -78,9 +78,9 @@ Item {
             anchors.leftMargin: 18; anchors.rightMargin: 18
             height: col.implicitHeight + 24
             radius: Theme.radius
-            color: row.cursor ? Theme.selection : hov.hovered ? Qt.rgba(Theme.fg.r, Theme.fg.g, Theme.fg.b, 0.04) : Theme.surface
-            border.color: row.cursor ? Theme.fg : Theme.hairline
-            border.width: row.cursor ? 2 : 1
+            color: row.cursor ? Theme.itemCursor : hov.hovered ? Theme.itemHover : Theme.surface
+            border.color: Theme.hairline
+            border.width: 1
 
             Column {
                 id: col

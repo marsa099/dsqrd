@@ -18,13 +18,17 @@ Singleton {
     readonly property var palettes: ({
         "light": {
             "bg":          "#FFFFFF",
+            "bg_dim":      "#F5F5F7",
             "bg_alt":      "#F6F7F4",
             "selection":   "#F4F5F2",
             "surface":     "#F7F7F7",
             "surface0":    "#FBFBFB",
             "surface1":    "#F7F7F7",
             "surface2":    "#EDEDED",
-            "surface3":    "#E4E4E4",
+            "surface3":    "#E3E3E7",
+            "itemHover":    "#EDEDED",
+            "itemSelected": "#F4F5F2",
+            "itemCursor":   "#E3E3E7",
             "overlay":     "#E9EAE7",
             "prompt":      "#EEEFEC",
             "fg":          "#10100E",
@@ -33,8 +37,9 @@ Singleton {
             "red":         "#7c3438",
             "orange":      "#e16511",
             "yellow":      "#df9001",
-            "green":       "#5E7270",
+            "green":       "#587969",
             "sky":         "#0284C7",
+            "electric":    "#0000f2",
             "cursor":      "#FF570D",
             "ink":         "#1C1C1C",
             "warning":     "#F5DECE",
@@ -43,14 +48,18 @@ Singleton {
             "dimmedFgAlpha": 0.55
         },
         "dark": {
-            "bg":          "#181818",
+            "bg":          "#171717",
+            "bg_dim":      "#0a0a0a",
             "bg_alt":      "#1B1B1B",
             "selection":   "#2E2E2E",
-            "surface":     "#1B1B1B",
-            "surface0":    "#1A1A1A",
-            "surface1":    "#1B1B1B",
-            "surface2":    "#2E2E2E",
-            "surface3":    "#3A3A3A",
+            "surface":     "#262626",
+            "surface0":    "#191919",
+            "surface1":    "#262626",
+            "surface2":    "#2D2D2D",
+            "surface3":    "#393939",
+            "itemHover":    "#2D2D2D",
+            "itemSelected": "#2E2E2E",
+            "itemCursor":   "#393939",
             "overlay":     "#292826",
             "prompt":      "#323A40",
             "fg":          "#EDEDED",
@@ -61,6 +70,7 @@ Singleton {
             "yellow":      "#ff8a31",
             "green":       "#97B5A6",
             "sky":         "#7DD3FC",
+            "electric":    "#5566ff",
             "cursor":      "#FF570D",
             "ink":         "#1B1B1B",
             "warning":     "#462415",
@@ -71,6 +81,7 @@ Singleton {
     })
 
     readonly property color bg:           palettes[mode].bg
+    readonly property color bgDim:        palettes[mode].bg_dim   // rail ground, darker than the editor
     readonly property color bg_alt:       palettes[mode].bg_alt
     readonly property color selection:    palettes[mode].selection
     readonly property color surface:      palettes[mode].surface
@@ -79,6 +90,9 @@ Singleton {
     readonly property color surface1:     palettes[mode].surface1
     readonly property color surface2:     palettes[mode].surface2
     readonly property color surface3:     palettes[mode].surface3
+    readonly property color itemHover:    palettes[mode].itemHover
+    readonly property color itemSelected: palettes[mode].itemSelected
+    readonly property color itemCursor:   palettes[mode].itemCursor
     readonly property color overlay:      palettes[mode].overlay
     readonly property color prompt:       palettes[mode].prompt
     readonly property color fg:           palettes[mode].fg
@@ -89,6 +103,7 @@ Singleton {
     readonly property color yellow:       palettes[mode].yellow
     readonly property color green:        palettes[mode].green
     readonly property color sky:          palettes[mode].sky
+    readonly property color electric:     palettes[mode].electric
     readonly property color cursor:       palettes[mode].cursor
     // Exposed existing palette colors (no new colors.json entries): near-black for
     // text on bright accents/badges + the modal scrim, the warning bg + yellow for
@@ -96,6 +111,8 @@ Singleton {
     readonly property color ink:          palettes[mode].ink
     readonly property color warning:      palettes[mode].warning
     readonly property color brightWhite:  palettes[mode].brightWhite
+    readonly property color contrastSurface: mode === "light" ? ink : fg
+    readonly property color onContrast: mode === "light" ? bg : ink
 
     readonly property real hairlineAlpha: palettes[mode].hairlineAlpha
     readonly property real dimmedFgAlpha: palettes[mode].dimmedFgAlpha
@@ -117,7 +134,15 @@ Singleton {
     readonly property int padding:   12
     readonly property int paddingSm: 6
     readonly property int fontSize:  14
-    readonly property string fontFamily: "GeistMono Nerd Font"
+    function resolveFontFamily(preferred) {
+        const available = Qt.fontFamilies()
+        const candidates = [preferred, "GeistMono Nerd Font", "DejaVu Sans Mono", "Noto Sans Mono", "Liberation Mono"]
+        for (const family of candidates) {
+            if (available.indexOf(family) >= 0) return family
+        }
+        return "monospace"
+    }
+    readonly property string fontFamily: resolveFontFamily("BerkeleyMono Nerd Font")
     // 400 under NativeRendering ≈ the old 500 under distance fields
     readonly property int fontWeight: 400
 

@@ -21,6 +21,9 @@
           filetype
           protobuf
           jeepney
+          pycryptodome
+          qrcode
+          pillow
         ];
         installPhase = ''
           runHook preInstall
@@ -30,7 +33,7 @@
           makeWrapper ${pkgs.python3}/bin/python3 $out/bin/dsqrd \
             --add-flags "$out/share/dsqrd/dsqrd.py" \
             --prefix PYTHONPATH : "$PYTHONPATH" \
-            --prefix PATH : "${pkgs.lib.makeBinPath [ pkgs.ffmpeg pkgs.imagemagick ]}" \
+            --prefix PATH : "${pkgs.lib.makeBinPath [ pkgs.ffmpeg pkgs.imagemagick pkgs.libsecret ]}" \
             --set DSQRD_REV "${self.rev or ""}" \
             --set DSQRD_UPDATE_REPO "marsa099/dsqrd" \
             --set DSQRD_UPSTREAM_REPO "daphen/dsqrd" \
@@ -46,7 +49,7 @@
         text = ''
           export QML2_IMPORT_PATH="$HOME/.local/share/qml:${daemon}/share/dsqrd/ui/vendor''${QML2_IMPORT_PATH:+:$QML2_IMPORT_PATH}"
           export SLK_SOCK=dsqrd
-          export SLK_MEDIA_VIEWER="${daemon}/share/dsqrd/media-viewer.sh"
+          export SLK_MEDIA_VIEWER="''${SLK_MEDIA_VIEWER:-${daemon}/share/dsqrd/media-viewer.sh}"
           sock="$XDG_RUNTIME_DIR/dsqrd.sock"
 
           # serialize the daemon aliveness check + spawn: concurrent launches
@@ -54,10 +57,11 @@
           exec 9>"$XDG_RUNTIME_DIR/dsqrd-launch.lock"
           flock 9
           alive=""
-          # match the installed daemon path, not bare 'dsqrd.py' — any process
-          # whose argv merely mentions the filename (an editor, a Claude session
-          # prompt) would otherwise read as a live daemon and the real one never
-          # gets started, leaving the UI on a dead socket
+          # match the installed daemon path, not a bare 'dsqrd.py' — any process
+          # whose argv merely mentions the filename (an editor, a grep, an agent
+          # session with it in the prompt) otherwise reads as a live daemon, so
+          # the real one never starts and the UI waits out its 30s on a socket
+          # nothing will ever bind
           for pid in $(pgrep -f 'share/dsqrd/dsqrd\.py' 2>/dev/null); do
             # a zombie (unreaped child) matches pgrep but serves nothing
             case "$(ps -o stat= -p "$pid" 2>/dev/null)" in Z*|"") ;; *) alive=1 ;; esac
@@ -79,7 +83,8 @@
           fi
           # close the launch lock for qs — an inherited fd 9 holds the lock
           # for the UI's whole lifetime and deadlocks future launches
-          exec qs -p "${daemon}/share/dsqrd/ui" 9>&-
+          # Key duplicate detection to this config, not an older Nix store path.
+          exec qs --no-duplicate -p "${daemon}/share/dsqrd/ui" 9>&-
         '';
       };
     in {

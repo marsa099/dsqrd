@@ -4,13 +4,14 @@ import QsLib
 // While-away summary, styled after the newtab "Today" card: display hero title,
 // mono uppercase section headers with count chips, orange accent on the lead +
 // bullet markers. claude returns sectioned markdown (TL;DR, ## HEADERS, - bullets),
-// parsed into selectable CATEGORIES: j/k moves the selection, y yanks the
-// selected category, Y yanks the whole summary, ⌃d/⌃u scroll a long one.
+// parsed into selectable CATEGORIES: ↑/↓ moves the selection, y yanks the
+// selected category, Y yanks the whole summary, and j/k or ⌃d/⌃u scroll.
 Modal {
     id: sm
     property string text: ""
-    property string title: "Summary"
+    property string title: "Köttsumlary"
     property string meta: "WHILE AWAY"
+    property string coverage: ""
     property int sel: 0
     panelWidth: Math.round(Math.min(860, sm.width - 64))
     maxHeightFrac: 0.72
@@ -24,10 +25,11 @@ Modal {
     readonly property string fgHex: "" + Theme.fg
     readonly property var cats: sm._cats(sm.text)
 
-    function showWith(t, ch) {
+    function showWith(t, ch, span) {
         text = t || ""
-        title = "Summary"
+        title = "Köttsumlary"
         meta = (ch && ch.length) ? ("" + ch).toUpperCase() : "WHILE AWAY"
+        coverage = span || ""
         sel = 0
         askInput.focus = false; askInput.text = ""   // nav owns the keyboard until `i`
         show()
@@ -37,6 +39,7 @@ Modal {
         text = t || ""
         title = "Answer"
         meta = (q && q.length) ? ("" + q).slice(0, 90) : ""
+        coverage = ""
         sel = 0
         askInput.focus = false; askInput.text = ""
         show()
@@ -114,8 +117,10 @@ Modal {
     onKeyPressed: e => {
         if (askInput.activeFocus) return   // the follow-up field owns the keyboard
         if (e.key === Qt.Key_I) { askInput.forceActiveFocus(); e.accepted = true }
-        else if (e.key === Qt.Key_J || e.key === Qt.Key_Down) { sm.sel = Math.min(sm.sel + 1, sm.cats.length - 1); e.accepted = true }
-        else if (e.key === Qt.Key_K || e.key === Qt.Key_Up) { sm.sel = Math.max(sm.sel - 1, 0); e.accepted = true }
+        else if (e.key === Qt.Key_J) { sm.scrollBy(48); e.accepted = true }
+        else if (e.key === Qt.Key_K) { sm.scrollBy(-48); e.accepted = true }
+        else if (e.key === Qt.Key_Down) { sm.sel = Math.min(sm.sel + 1, sm.cats.length - 1); e.accepted = true }
+        else if (e.key === Qt.Key_Up) { sm.sel = Math.max(sm.sel - 1, 0); e.accepted = true }
         else if (e.key === Qt.Key_Y && (e.modifiers & Qt.ShiftModifier)) {
             const all = sm.cats.map(c => c.plain).join("\n\n")
             Backend.copyRaw(all); Backend.toast("Copied summary"); e.accepted = true
@@ -128,10 +133,23 @@ Modal {
     }
 
     header: Item {
-        width: parent.width; height: 40
+        width: parent.width; height: sm.coverage.length ? 58 : 40
+        PineconeIcon {
+            id: titleCone
+            visible: sm.title === "Köttsumlary"
+            width: 34; height: 34
+            rotation: -18
+            transformOrigin: Item.Center
+            anchors.left: parent.left; anchors.bottom: hTitle.baseline
+            anchors.bottomMargin: -3
+            color: Theme.fg
+        }
         Text {
             id: hTitle
-            anchors.left: parent.left; anchors.bottom: parent.bottom; anchors.bottomMargin: -2
+            anchors.left: titleCone.visible ? titleCone.right : parent.left
+            anchors.leftMargin: titleCone.visible ? 10 : 0
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: sm.coverage.length ? 16 : -2
             text: sm.title; color: Theme.fg
             font.family: sm.titleFont; font.pixelSize: 34; font.weight: 400; font.capitalization: Font.AllUppercase
             font.letterSpacing: -0.3
@@ -141,6 +159,12 @@ Modal {
             text: sm.meta; color: Theme.fg_muted
             font.family: Theme.fontFamily; font.pixelSize: 11; font.weight: 500
             font.letterSpacing: 0.6
+        }
+        Text {
+            visible: sm.coverage.length > 0
+            anchors.left: parent.left; anchors.bottom: parent.bottom
+            text: sm.coverage; color: Theme.fg_muted
+            font.family: Theme.fontFamily; font.pixelSize: 11
         }
         Rectangle {
             anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.bottom
@@ -181,7 +205,7 @@ Modal {
             anchors.horizontalCenter: parent.horizontalCenter
             spacing: 5
             KeyCap { anchors.verticalCenter: parent.verticalCenter; small: true; text: "j/k" }
-            CapLabel { anchors.verticalCenter: parent.verticalCenter; text: "move" }
+            CapLabel { anchors.verticalCenter: parent.verticalCenter; text: "scroll" }
             Item { width: 9; height: 1 }
             KeyCap { anchors.verticalCenter: parent.verticalCenter; small: true; text: "y" }
             CapLabel { anchors.verticalCenter: parent.verticalCenter; text: "yank" }
@@ -208,6 +232,7 @@ Modal {
                 required property var modelData
                 width: parent.width
                 implicitHeight: catCol.implicitHeight
+                height: implicitHeight
 
                 // selection highlight behind the whole category — inset 4px so the
                 // rounded pill never reaches the Flickable's clip edge (was cut off),
@@ -235,6 +260,7 @@ Modal {
                                           + (headL.item ? headL.item.implicitHeight : 0)
                                           + (bulletL.item ? bulletL.item.implicitHeight : 0)
                                           + (paraL.item ? paraL.item.implicitHeight : 0)
+                            height: implicitHeight
 
                             Loader {
                                 id: tldrL

@@ -37,9 +37,10 @@ import urllib.parse
 import urllib.request
 import websocket   # CDP client for the hidden voice Helium (also a dchat dep)
 from datetime import datetime
+from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from dchat import client_properties, discord as discord_mod, gateway as gateway_mod, token
+from dchat import client_properties, discord as discord_mod, gateway as gateway_mod, remote_auth, token
 from dchat.notifier import Notifier
 
 SOCK = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "dsqrd.sock")
@@ -55,7 +56,7 @@ def _have_ffmpeg():
     if getattr(_have_ffmpeg, "_ok", False):
         return True
     ok = bool(shutil.which("ffmpeg")) and bool(shutil.which("ffprobe"))
-    _have_ffmpeg._ok = ok
+    setattr(_have_ffmpeg, "_ok", ok)
     return ok
 
 
@@ -125,7 +126,7 @@ def load_token():
     tok = _token_from(token.load_plain("~/.config/dsqrd/profiles.json"))
     if tok:
         return tok
-    sys.exit("dsqrd: no Discord token found (put one in ~/.config/dsqrd/profiles.json)")
+    return None
 
 
 CDN = "https://cdn.discordapp.com"
@@ -147,25 +148,82 @@ def banner_url(user_id, banner_hash):
 DISCORD_EPOCH = 1420070400000
 
 SUMMARIZE_SYS = (
-    "You summarize a chat channel for someone who was away. Output GitHub-flavored "
-    "markdown in this exact shape:\n"
-    "1. One line starting with `**TL;DR:**` — a single sentence covering the whole span.\n"
-    "2. Then group the conversation into 2-5 thematic sections, each introduced by a "
-    "`## ` header of one or two words (e.g. Gaming, Work, Personal).\n"
-    "3. Under each header, a few concise bullets (`- `). Start every bullet with a "
+    "You catch someone up on a chat channel they were away from.\n"
+    "\n"
+    "The transcript is one message per line, oldest first, as `[HH:MM] name: text`. "
+    "Names are the speakers' own display names — reuse them verbatim, never invent or "
+    "translate them.\n"
+    "\n"
+    "What matters most, in order: anything that needs the reader (a question put to "
+    "them, something asked of them, a deadline), then decisions reached, then what was "
+    "merely discussed. Lead with the first kind wherever it exists — a recap that "
+    "buries \"you were asked X\" under small talk has failed. Any line marked "
+    "`[MENTIONS YOU — HIGH PRIORITY]` directly tags the reader: always preserve and "
+    "surface it, even when a requested topic would otherwise exclude it.\n"
+    "\n"
+    "Output GitHub-flavored markdown in this exact shape — the app parses it, so do "
+    "not deviate:\n"
+    "1. One line starting with `**TL;DR:**` — a single sentence covering the whole "
+    "span, naming what needs the reader if anything does.\n"
+    "2. Then one `## ` header per theme, one or two words (e.g. Gaming, Work, "
+    "Release). Use as many as the conversation actually has: three lines about one "
+    "topic is ONE section, not two — never invent a theme to fill a quota.\n"
+    "3. Under each header, flat `- ` bullets, one line each. Start every bullet with a "
     "**bold lead** (the topic or person in **bold**), then ` — ` and the detail.\n"
-    "Write the summary in the SAME LANGUAGE the conversation is mostly in (match the "
-    "messages, not this instruction). Be concise; name who said what where it matters. "
-    "No preamble and no closing remarks."
+    "\n"
+    "Bullets are points, not a replay of the transcript: fold a back-and-forth that "
+    "settles one thing into ONE bullet naming the outcome, and drop messages that add "
+    "nothing. Ten messages about one decision is one bullet.\n"
+    "\n"
+    "Be SPECIFIC or say nothing. Carry over the concrete things the messages contain — "
+    "who, the day or date, the time, the number, the place, the name of the thing — and "
+    "resolve relative talk against the timestamps (\"next month\" becomes the month's "
+    "name; \"tomorrow\" becomes the day). Never swap a person for a role: if Davve got "
+    "lost, say Davve, not \"a visitor\". Never restate a topic as though it were "
+    "information — \"they discussed the trip\" and \"working on yoga\" tell the reader "
+    "nothing. If the transcript gives you nothing concrete on a topic, leave that "
+    "bullet out entirely; a short specific recap beats a complete vague one.\n"
+    "\n"
+    "Inline `**bold**`, `` `code` `` and `[text](url)` all render — keep a link someone "
+    "shared if it's worth going back to. Nested bullets, tables, code fences and "
+    "headers deeper than `##` do NOT render; never use them. Around a dozen bullets "
+    "total is plenty; a long transcript gets tighter bullets, not more of them.\n"
+    "\n"
+    "Skip joins, leaves, bare reactions and bot chatter unless something turns on "
+    "them. Say only what the transcript supports — no guessing at what someone meant, "
+    "and if the span is thin, a TL;DR and one short section is the right answer.\n"
+    "\n"
+    "Write in the SAME LANGUAGE the conversation is mostly in (match the messages, not "
+    "this instruction). No preamble and no closing remarks."
 )
 
 ANSWER_SYS = (
     "You answer a question about a chat conversation, using only what the transcript "
-    "below shows. Be concise and direct — a short paragraph or a few bullets in "
-    "GitHub-flavored markdown. Name who said what where it matters. Answer in the SAME "
-    "LANGUAGE the conversation is mostly in (match the messages, not this instruction). "
-    "If the transcript doesn't contain the answer, say so plainly. No preamble."
+    "shows. It is one message per line, oldest first, as `[HH:MM] name: text`; reuse "
+    "the names verbatim.\n"
+    "Be concise and direct — a short paragraph or a few flat `- ` bullets in "
+    "GitHub-flavored markdown (no nested bullets, tables or code fences). Quote or "
+    "attribute where it settles the question, and give the time when the answer turns "
+    "on when something was said.\n"
+    "If the transcript doesn't contain the answer, say so plainly and say what it does "
+    "show instead — never fill the gap with a guess. Answer in the SAME LANGUAGE the "
+    "conversation is mostly in (match the messages, not this instruction). No preamble."
 )
+
+
+# The stretch of conversation a summary/answer covers, in words the model can use.
+# do_summarize/do_ask know the scope; without it the recap can't say what it covered.
+SPAN_LABELS = {
+    "session": "the current burst of conversation, since the last long silence",
+    "all_new": "everything posted since the reader last spoke in this channel before their current visit",
+    "last_day": "the last 24 hours",
+    "last_week": "the last week",
+    "user": "one person's messages from the current conversation",
+}
+
+
+def span_label(scope):
+    return SPAN_LABELS.get(scope or "", "the channel's recent messages")
 
 
 def snowflake_date(user_id):
@@ -219,18 +277,26 @@ def emoji_url(emoji_id, animated=False):
 
 EMOJI_JSON = os.path.join(_data_dir(), "emoji-dsqrd.json")
 PREFS_JSON = os.path.join(_data_dir(), "prefs-dsqrd.json")
+PARTICIPATION_MARKERS_JSON = os.path.join(_data_dir(), "participation-markers.json")
+SUMMARY_CHUNK_CHARS = 12000
+SUMMARY_NOTE_CHARS = 5000
+SUMMARY_RECENT_SPEAK_GRACE_MS = 2 * 60 * 1000
+
+
+def _load_json_dict(path):
+    try:
+        with open(path) as f:
+            value = json.load(f)
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
 
 
 def _load_prefs():
     """UI preferences persisted across restarts (sidebar collapsed, recent
     channels, last-active channel). Frequent update-restarts otherwise reset
     them every time. Best-effort: a missing/corrupt file just yields {}."""
-    try:
-        with open(PREFS_JSON) as f:
-            p = json.load(f)
-            return p if isinstance(p, dict) else {}
-    except Exception:
-        return {}
+    return _load_json_dict(PREFS_JSON)
 
 
 IMG_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".apng")
@@ -260,13 +326,21 @@ def _derive_gif(url):
     return None
 
 
-def _qt_img(url):
+def _qt_img(url, force=False):
     """Inline display URL safe for this Qt build, which has no webp decoder.
     Discord's media proxy transcodes on demand — ask it for png when the
     inline path would be webp. Only for display paths; `full` keeps the
-    original (imv/mpv decode webp fine)."""
-    if url and ".webp" in _clean(url).lower() and re.search(r"(?:images-ext-\d+|media)\.discordapp\.net/", url):
-        return url + ("&" if "?" in url else "?") + "format=png"
+    original (imv/mpv decode webp fine).
+
+    force skips the URL sniffing, for a source known to be webp from its
+    mimetype while named something else — the caller must already point at a
+    transcoding host."""
+    if not url:
+        return url
+    if force or (".webp" in _clean(url).lower() and re.search(r"(?:images-ext-\d+|media)\.discordapp\.net/", url)):
+        # signed CDN URLs end in a bare "&"; don't leave an empty param behind it
+        base = url.rstrip("&?")
+        return base + ("&" if "?" in base else "?") + "format=png"
     return url
 
 
@@ -343,9 +417,14 @@ def map_embeds(m, content):
             gif = t == "image/gif" or _clean(src).endswith((".gif", ".apng"))
             disp = src
             if t == "image/webp" or _clean(src).lower().endswith(".webp"):
-                # signed attachment CDN doesn't transcode; its media.* twin does
-                disp = src.replace("cdn.discordapp.com", "media.discordapp.net")
-                disp = _qt_img(disp)
+                # signed attachment CDN doesn't transcode; its media.* twin does —
+                # but only when asked. The filename can't be trusted to reveal the
+                # format: Discord names every clipboard paste "image.png" whatever
+                # the bytes are, so a webp screenshot arrives as image.png with
+                # content_type image/webp. Force the transcode off the mimetype.
+                # Without it media.* serves the webp original and the image renders
+                # blank (while the untouched cdn URL would have served png).
+                disp = _qt_img(src.replace("cdn.discordapp.com", "media.discordapp.net"), force=True)
             imgs.append({"path": disp, "full": src, "w": hw[1] or 0, "h": hw[0] or 0,
                          "id": mid, "ext": "", "type": "gif" if gif else "img", "pending": False})
             continue
@@ -515,6 +594,27 @@ def hhmm(iso):
         return iso[11:16] if len(iso) >= 16 else ""
 
 
+def local_day(iso):
+    """Local calendar day of a Discord timestamp, for spotting a multi-day span."""
+    try:
+        return datetime.fromisoformat(iso).astimezone().strftime("%Y-%m-%d")
+    except Exception:
+        return (iso or "")[:10]
+
+
+def stamp(iso, with_date):
+    """Transcript timestamp. A summary of several days needs the DAY, not just the
+    clock — without it the model cannot say "left on Tuesday" and falls back to
+    mush like "next month"."""
+    if not iso:
+        return ""
+    try:
+        d = datetime.fromisoformat(iso).astimezone()
+        return d.strftime("%a %-d %b %H:%M") if with_date else d.strftime("%H:%M")
+    except Exception:
+        return iso[:16] if with_date else (iso[11:16] if len(iso) >= 16 else "")
+
+
 def daykey(iso):
     # YYYYMMDD in local time — matches the UI's date-divider key (Backend._dk),
     # so dsqrd messages group by real day instead of by garbage snowflake math.
@@ -596,6 +696,8 @@ def map_msg(m):
         body = ""
     if unfurls:
         body = (body + ("\n" if body else "") + "\n".join(unfurls)).strip()
+    if not body and not imgs:
+        body = "Unsupported message type"
     rx = []
     for r in m.get("reactions", []) or []:
         eid = r.get("emoji_id")
@@ -810,12 +912,14 @@ class VoiceCall:
 class DQS:
     def __init__(self):
         self.token = load_token()
-        cp = client_properties.get_default_properties()
-        self.user_agent = cp["browser_user_agent"]
-        cp_gateway = client_properties.add_for_gateway(cp)
-        cp_enc = client_properties.encode_properties(cp)
-        self.discord = discord_mod.Discord(self.token, None, cp_enc, self.user_agent)
-        self.gateway = gateway_mod.Gateway(self.token, None, cp_gateway, self.user_agent)
+        self.client_props = client_properties.get_default_properties()
+        self.user_agent = self.client_props["browser_user_agent"]
+        self.discord: Any = None
+        self.gateway: Any = None
+        self.signed_in = False
+        self.auth_status = {"type": "auth", "state": "connecting" if self.token else "signedOut"}
+        self.auth_session = None
+        self.auth_lock = threading.Lock()
         self.guilds = []          # [{id,name,channels:[...]}]
         self.dms = []             # [{id,type,name,recipients}]
         self.chan_guild = {}      # channel id -> workspace id (guild_id or DM_WS)
@@ -828,8 +932,9 @@ class DQS:
         self.chan_users = {}      # channel_id -> {uid: display name} — participants seen per channel
         self.emoji_by_name = {}   # custom emoji name -> (id, animated) for react/send resolution
         self.codemap = _load_codemap()   # standard shortcode name -> unicode glyph (for reactions)
-        self.notifier = None      # dbus notifier (clickable → open channel)
-        self.app_active = False   # is our client window currently focused?
+        self.notifier: Any = None      # dbus notifier (clickable → open channel)
+        self.app_active = False   # focus state reported by the connected UI
+        self.focus_conn = None    # connection owning that focus claim
         self.user_names = {}      # user id -> display name (for DM typing indicators)
         self.pending_attach = {}  # channel id -> uploaded attachment, sent with next message
         self.uploading = {}       # channel id -> Event set when an in-flight upload finishes
@@ -855,6 +960,10 @@ class DQS:
         self._update_lock = threading.Lock()
         self.prefs = _load_prefs()   # persisted UI prefs, replayed on bootstrap
         self._prefs_lock = threading.Lock()
+        self._visit_markers = _load_json_dict(PARTICIPATION_MARKERS_JSON)
+        self._visit_cutoffs = {}
+        self._latest_messages = {}
+        self._visit_lock = threading.Lock()
 
     def _save_prefs(self):
         with self._prefs_lock:
@@ -865,6 +974,159 @@ class DQS:
                 os.replace(tmp, PREFS_JSON)
             except Exception:
                 pass
+
+    def _eligible_participation_cutoff(self, message_id):
+        try:
+            sent_ms = (int(message_id) >> 22) + DISCORD_EPOCH
+        except (TypeError, ValueError):
+            return False
+        return sent_ms <= int(time.time() * 1000) - SUMMARY_RECENT_SPEAK_GRACE_MS
+
+    def _enter_visit(self, channel):
+        if not channel:
+            return
+        channel = str(channel)
+        with self._visit_lock:
+            try:
+                cutoff = int(self._visit_markers.get(channel) or 0)
+            except (TypeError, ValueError):
+                cutoff = 0
+            self._visit_cutoffs[channel] = cutoff if self._eligible_participation_cutoff(cutoff) else 0
+
+    def _seed_participation_cutoff(self, channel, messages):
+        channel = str(channel)
+        with self._visit_lock:
+            if self._visit_cutoffs.get(channel):
+                return
+            for message in messages:
+                message_id = message.get("id")
+                if (str(message.get("user_id") or "") == str(self.my_id)
+                        and self._eligible_participation_cutoff(message_id)):
+                    try:
+                        self._visit_cutoffs[channel] = int(message_id or 0)
+                    except (TypeError, ValueError):
+                        pass
+                    return
+
+    def _leave_visit(self, channel):
+        if not channel:
+            return
+        channel = str(channel)
+        with self._visit_lock:
+            try:
+                latest = int(self._latest_messages.get(channel) or 0)
+                previous = int(self._visit_markers.get(channel) or 0)
+            except (TypeError, ValueError):
+                return
+            if not latest or latest <= previous:
+                return
+            updated = dict(self._visit_markers)
+            updated[channel] = str(latest)
+            try:
+                tmp = PARTICIPATION_MARKERS_JSON + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump(updated, f, sort_keys=True)
+                os.replace(tmp, PARTICIPATION_MARKERS_JSON)
+            except OSError:
+                return
+            self._visit_markers = updated
+
+    def _note_latest(self, channel, message):
+        if str(message.get("user_id") or "") != str(self.my_id):
+            return
+        try:
+            message_id = int(message.get("id") or 0)
+        except (TypeError, ValueError):
+            return
+        channel = str(channel)
+        with self._visit_lock:
+            self._latest_messages[channel] = max(message_id, int(self._latest_messages.get(channel) or 0))
+
+    def _set_auth(self, state, **fields):
+        self.auth_status = {"type": "auth", "state": state, **fields}
+        self.broadcast(self.auth_status)
+
+    def start_auth(self):
+        with self.auth_lock:
+            if self.auth_session is not None or self.signed_in:
+                return
+            self.auth_session = remote_auth.RemoteAuth(
+                self.user_agent,
+                lambda event: self._set_auth(event.pop("state"), **event),
+            )
+        threading.Thread(target=self._run_auth, daemon=True).start()
+
+    def cancel_auth(self):
+        with self.auth_lock:
+            if self.auth_session:
+                self.auth_session.cancel()
+                self._set_auth("signedOut")
+
+    def _run_auth(self):
+        session = self.auth_session
+        assert session is not None
+        credential = session.run()
+        with self.auth_lock:
+            self.auth_session = None
+        if not credential:
+            return
+        try:
+            token.save_secret(credential)
+        except Exception:
+            self._set_auth("error", message="Could not store the Discord session in Secret Service")
+            return
+        self.token = credential
+        self._connect_discord(credential)
+
+    def _connect_stored(self):
+        try:
+            self._connect_discord(self.token)
+        finally:
+            if not self.signed_in and self.auth_status.get("state") == "connecting":
+                self._set_auth("signedOut", message="The stored Discord session is no longer valid")
+
+    def _connect_discord(self, credential):
+        self._set_auth("connecting")
+        props_gateway = client_properties.add_for_gateway(self.client_props)
+        props_encoded = client_properties.encode_properties(self.client_props)
+        try:
+            self.discord = discord_mod.Discord(credential, None, props_encoded, self.user_agent)
+            self.gateway = gateway_mod.Gateway(credential, None, props_gateway, self.user_agent)
+            self.discord.get_my_id()
+        except SystemExit:
+            self.discord = None
+            self.gateway = None
+            self._set_auth("signedOut", message="The stored Discord session is no longer valid")
+            return
+        except Exception:
+            self.discord = None
+            self.gateway = None
+            self._set_auth("error", message="Could not connect to Discord")
+            return
+        threading.Thread(target=self.gateway.connect, daemon=True).start()
+        try:
+            ready = self.wait_ready()
+        except Exception:
+            ready = False
+        if not ready:
+            self.discord = None
+            self.gateway = None
+            self._set_auth("error", message="Discord did not finish connecting")
+            return
+        refreshed = self.gateway.get_token_update()
+        if refreshed:
+            try:
+                token.save_secret(refreshed)
+                self.token = refreshed
+            except Exception:
+                self.broadcast({"type": "error", "message": "Could not store Discord's refreshed session"})
+        self.signed_in = True
+        self._set_auth("signedIn")
+        with self.lock:
+            clients = list(self.conns)
+        for conn in clients:
+            self.send_bootstrap(conn)
+        self._start_workers()
 
     # ---- wire helpers ----
     def write(self, conn, obj):
@@ -893,10 +1155,14 @@ class DQS:
 
     # ---- startup snapshot ----
     def wait_ready(self):
+        ready = False
         for _ in range(120):
             if self.gateway.get_ready():
+                ready = True
                 break
             time.sleep(0.5)
+        if not ready:
+            return False
         # get_guilds returns the list once, then None until it changes
         for _ in range(40):
             g = self.gateway.get_guilds()
@@ -936,6 +1202,7 @@ class DQS:
                 if r.get("id"):
                     self.user_names[str(r["id"])] = r.get("global_name") or r.get("username") or ""
         print(f"dsqrd: {len(self.guilds)} guilds, {len(self.dms)} DMs, {len(self.chan_name)} channels", flush=True)
+        return True
 
     def _build_emoji(self):
         """Index guild custom emoji (name -> id/animated) and write the picker
@@ -1038,6 +1305,9 @@ class DQS:
         self.write(conn, {"type": "prefs", "prefs": self.prefs})
         if self.update_event:   # replay update-available state to a (re)connecting client
             self.write(conn, self.update_event)
+        self.write(conn, self.auth_status)
+        if not self.signed_in:
+            return
         self.write(conn, self._workspaces_msg())
         self.write(conn, {"type": "users", "users": self.users_payload()})
         self.write(conn, self._channels_msg())
@@ -1060,7 +1330,9 @@ class DQS:
         except Exception:
             pass
         msgs = self.discord.get_messages(channel_id, num=50) or []
+        self._seed_participation_cutoff(channel_id, msgs)
         for m in msgs:
+            self._note_latest(channel_id, m)
             self.learn_participant(channel_id, m)
         out = [map_msg(m) for m in msgs]
         for mm in out:
@@ -1128,6 +1400,28 @@ class DQS:
         except Exception:
             return {}
 
+    def _pi_cli(self, cfg, sysp, prompt):
+        # pi in print mode. Unlike the claude/codex paths this is NOT keyless: pi
+        # resolves the provider from a key. Take it from the summarize block when
+        # set and hand it over through the ENVIRONMENT — never argv, which any
+        # local process can read out of /proc/<pid>/cmdline.
+        # --no-tools because pi is a coding agent (read/bash/edit/write) and a
+        # summarizer must not touch the filesystem; --no-session so recaps don't
+        # accumulate session files.
+        env = dict(os.environ)
+        env["PATH"] = "/etc/profiles/per-user/{}/bin:/run/current-system/sw/bin:{}/.local/bin:{}".format(
+            os.environ.get("USER", ""), os.path.expanduser("~"), env.get("PATH", ""))
+        if cfg.get("api_key"):
+            env["OPENAI_API_KEY"] = cfg["api_key"]
+        cmd = ["pi", "-p", "--model", cfg.get("model") or "openai/gpt-5.5",
+               "--no-tools", "--no-session", "--system-prompt", sysp]
+        r = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
+                           env=env, cwd="/tmp", timeout=180)
+        out = (r.stdout or "").strip()
+        if r.returncode != 0 or not out:
+            raise RuntimeError(((r.stderr or "") + " " + out).strip()[:200] or "pi -p failed")
+        return out
+
     def _claude_cli(self, cfg, prompt):
         # Keyless path: shells out to the `claude` CLI in print mode, which uses
         # the user's Claude Code login (Max plan) — no API key, no per-token bill.
@@ -1174,9 +1468,19 @@ class DQS:
             except Exception:
                 pass
 
-    def _llm_summarize(self, cfg, transcript):
+    def _llm_summarize(self, cfg, transcript, scope=None):
         sysp = cfg.get("prompt") or SUMMARIZE_SYS   # override in profiles.json, no restart
+        # appended after the override so a custom prompt still learns the span, and
+        # today's date so "next month" in a message resolves to a real month
+        sysp += ("\n\nThis transcript is " + span_label(scope)
+                 + ". Today is " + datetime.now().astimezone().strftime("%A %-d %B %Y") + ".")
+        if cfg.get("_summary_topic"):
+            sysp += ("\nSummarize only material relevant to this topic: "
+                     + str(cfg["_summary_topic"])
+                     + ". Omit unrelated discussion except lines marked `[MENTIONS YOU — HIGH PRIORITY]`, which must always be included.")
         prov = (cfg.get("provider") or "").lower()
+        if prov == "pi-cli":
+            return self._pi_cli(cfg, sysp, transcript)
         if prov == "claude-cli":
             return self._claude_cli(cfg, sysp + "\n\nChat transcript:\n" + transcript)
         if prov == "codex-cli":
@@ -1202,6 +1506,8 @@ class DQS:
         """One-shot chat with a system prompt + user content, same providers as
         _llm_summarize. Used by the ask (Q&A) path."""
         prov = (cfg.get("provider") or "").lower()
+        if prov == "pi-cli":
+            return self._pi_cli(cfg, sysp, user_content)
         if prov == "claude-cli":
             return self._claude_cli(cfg, sysp + "\n\n" + user_content)
         if prov == "codex-cli":
@@ -1224,8 +1530,6 @@ class DQS:
         return (data.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
 
     def _summ_line_text(self, m):
-        # Resolve Discord tokens to plain text for the transcript, so the model
-        # sees "@name" / ":emoji:" instead of raw <@id> / <:emoji:id> snowflakes.
         content = m.get("content") or ""
         names = {}
         for u in (m.get("mentions") or []):
@@ -1238,7 +1542,22 @@ class DQS:
         content = re.sub(r"<#(\d+)>", "#channel", content)
         content = re.sub(r"<@&\d+>", "@role", content)
         content = re.sub(r"<a?:([A-Za-z0-9_]+):\d+>", r":\1:", content)
-        return content.strip()
+        parts = [content.strip()] if content.strip() else []
+        for item in (m.get("embeds") or []):
+            name = item.get("name")
+            if not name:
+                continue
+            kind = str(item.get("type") or "file").split("/", 1)[0]
+            if kind == "audio" and item.get("duration_secs") is not None:
+                parts.append(f"[voice message: {name}, {round(float(item['duration_secs']))}s]")
+            else:
+                parts.append(f"[{kind}: {name}]")
+        for sticker in (m.get("stickers") or []):
+            parts.append("[sticker: " + (sticker.get("name") or "unnamed") + "]")
+        text = " ".join(parts).strip()
+        my_id = str(getattr(self, "my_id", "") or "")
+        tagged = my_id and any(str(u.get("id") or "") == my_id for u in (m.get("mentions") or []))
+        return ("[MENTIONS YOU — HIGH PRIORITY] " + text) if tagged and text else text
 
     def _session_start(self, raw, gap_secs, anchor_idx=None):
         """raw is oldest→newest. Returns the snowflake id of the first message of
@@ -1267,91 +1586,176 @@ class DQS:
         except Exception:
             return 0
 
-    def _gather_lines(self, channel, scope, user, cfg):
-        """Page the channel's recent history (no local cache → live fetch,
-        bounded), filter to the requested scope, and return oldest→newest
-        transcript lines. Shared by summarize and ask so both honor the same
-        ranges: session / all_new / last_day / last_week / a person."""
-        # scope → a cutoff snowflake; keep messages with id greater than it.
+    def _gather_lines(self, channel, scope, user, cfg, use_visit=False):
+        """Fetch every in-scope message, optionally stopping at the previous visit."""
         cutoff = 0
-        if scope == "all_new":
+        if use_visit and scope == "all_new":
+            channel = str(channel)
             try:
-                rs = (self.gateway.get_read_state() or {}).get(channel) or {}
-                cutoff = int(rs.get("last_acked_message_id") or 0)
-            except Exception:
+                cutoff = int(self._visit_cutoffs.get(channel) or 0)
+            except (TypeError, ValueError):
                 cutoff = 0
-        elif scope in ("last_day", "last_week"):
+        if scope in ("last_day", "last_week"):
             secs = 86400 if scope == "last_day" else 604800
-            unix_ms = int((time.time() - secs) * 1000)
-            cutoff = (unix_ms - DISCORD_EPOCH) << 22
-        CAP = 300
+            time_cutoff = (int((time.time() - secs) * 1000) - DISCORD_EPOCH) << 22
+            cutoff = max(cutoff, time_cutoff)
+
         raw, before = [], None
-        while len(raw) < CAP:
+        gap = int(cfg.get("session_gap") or 3600)
+        while True:
             page = self.discord.get_messages(channel, num=100, before=before) or []
             if not page:
                 break
-            raw.extend(page)
-            before = page[-1].get("id")   # newest-first → last entry is oldest
-            if len(page) < 100:
+            reached = False
+            for message in page:
+                try:
+                    mid = int(message.get("id") or 0)
+                except (TypeError, ValueError):
+                    mid = 0
+                if cutoff and mid <= cutoff:
+                    reached = True
+                    continue
+                raw.append(message)
+            if reached or len(page) < 100:
                 break
-        raw.reverse()   # oldest-first for the transcript
-        # "What's new" (session) and "from a person" are bounded to the current
-        # conversation session — the latest burst since a silence gap.
-        gap = int(cfg.get("session_gap") or 3600)
+            before = page[-1].get("id")
+            chronological = list(reversed(raw))
+            anchor = None
+            if scope == "user":
+                for i, message in enumerate(chronological):
+                    if str(message.get("user_id")) == str(user):
+                        anchor = i
+            needs_session_boundary = scope == "session" or (scope == "user" and anchor is not None)
+            if needs_session_boundary:
+                start = self._session_start(chronological, gap, anchor)
+                try:
+                    oldest = int(chronological[0].get("id") or 0)
+                except (TypeError, ValueError, IndexError):
+                    oldest = 0
+                if start and start > oldest:
+                    break
+
+        raw.reverse()
         session_start = 0
         if scope == "session":
-            session_start = self._session_start(raw, gap)   # channel's current session
+            session_start = self._session_start(raw, gap)
         elif scope == "user":
-            last_idx = -1                                    # the person's last message…
-            for i in range(len(raw)):
-                if str(raw[i].get("user_id")) == str(user):
+            last_idx = -1
+            for i, message in enumerate(raw):
+                if str(message.get("user_id")) == str(user):
                     last_idx = i
-            if last_idx >= 0:                                # …and the session it sits in
+            if last_idx >= 0:
                 session_start = self._session_start(raw, gap, last_idx)
 
-        def keep(m):
+        kept = []
+        for message in raw:
             try:
-                mid = int(m.get("id") or 0)
-            except Exception:
+                mid = int(message.get("id") or 0)
+            except (TypeError, ValueError):
                 mid = 0
-            if scope == "user":
-                if str(m.get("user_id")) != str(user):
-                    return False
-                return session_start == 0 or mid >= session_start
-            if scope == "session":
-                return session_start == 0 or mid >= session_start
-            if cutoff:
-                return mid > cutoff
-            return True
-
+            if scope == "user" and str(message.get("user_id")) != str(user):
+                continue
+            if scope in ("session", "user") and session_start and mid < session_start:
+                continue
+            if self._summ_line_text(message):
+                kept.append(message)
+        with_date = len({local_day(m.get("timestamp")) for m in kept}) > 1
         lines = []
-        for m in raw:
-            if not keep(m):
-                continue
-            content = self._summ_line_text(m)
-            if not content:
-                continue
-            name = m.get("nick") or m.get("global_name") or m.get("username") or "someone"
-            lines.append(f"[{hhmm(m.get('timestamp'))}] {name}: {content}")
-        return lines[-CAP:]
+        for message in kept:
+            name = message.get("nick") or message.get("global_name") or message.get("username") or "someone"
+            lines.append(f"[{stamp(message.get('timestamp'), with_date)}] {name}: {self._summ_line_text(message)}")
+        return {
+            "lines": lines,
+            "count": len(kept),
+            "start": kept[0].get("timestamp") if kept else "",
+            "end": kept[-1].get("timestamp") if kept else "",
+            "cursor": kept[-1].get("id") if kept else "",
+        }
 
-    def do_summarize(self, channel, scope, user):
-        """Summarize the channel's in-scope messages via the user-configured
-        provider. Result broadcasts as a "summary" event; failures toast."""
+    def _bounded_chunks(self, parts, limit=SUMMARY_CHUNK_CHARS):
+        chunks, current = [], ""
+        for part in parts:
+            rest = str(part)
+            while rest:
+                room = limit - len(current) - (1 if current else 0)
+                if room <= 0:
+                    chunks.append(current)
+                    current = ""
+                    continue
+                piece, rest = rest[:room], rest[room:]
+                current += ("\n" if current else "") + piece
+                if len(current) >= limit:
+                    chunks.append(current)
+                    current = ""
+        if current:
+            chunks.append(current)
+        return chunks
+
+    def _summarize_transcript(self, cfg, lines, scope, topic=""):
+        final_cfg = dict(cfg)
+        if topic:
+            final_cfg["_summary_topic"] = topic
+        chunks = self._bounded_chunks(lines)
+        if len(chunks) == 1:
+            return self._llm_summarize(final_cfg, chunks[0], scope)
+        topic_note = (f' Keep only material relevant to the topic "{topic}".' if topic else "")
+        mention_note = " Always preserve lines marked [MENTIONS YOU — HIGH PRIORITY], regardless of topic."
+        note_prompt = (
+            "Condense this transcript chunk into factual notes for a later final recap."
+            + topic_note
+            + mention_note
+            + " Preserve names, requests, decisions, dates, times, numbers, links, and attachment descriptions. "
+            "Do not add facts or preamble."
+        )
+        notes = []
+        for i, chunk in enumerate(chunks):
+            self.broadcast({"type": "summaryProgress", "done": i, "total": len(chunks)})
+            note = self._llm_call(cfg, note_prompt, chunk).strip()
+            if not note:
+                raise RuntimeError("empty chunk summary from provider")
+            notes.append(note[:SUMMARY_NOTE_CHARS])
+        while len(self._bounded_chunks(notes)) > 1:
+            groups = self._bounded_chunks(notes)
+            notes = []
+            for i, group in enumerate(groups):
+                self.broadcast({"type": "summaryProgress", "done": i, "total": len(groups)})
+                note = self._llm_call(cfg, note_prompt, group).strip()
+                if not note:
+                    raise RuntimeError("empty synthesis response from provider")
+                notes.append(note[:SUMMARY_NOTE_CHARS])
+        return self._llm_summarize(final_cfg, "Partial summaries:\n\n" + notes[0], scope)
+
+    def _coverage_text(self, count, start, end):
+        def display(value):
+            try:
+                return datetime.fromisoformat(value).astimezone().strftime("%-d %b %Y, %H:%M")
+            except Exception:
+                return value or "unknown time"
+        noun = "message" if count == 1 else "messages"
+        first, last = display(start), display(end)
+        return f"{count} {noun} · {first}" + (("–" + last) if last != first else "")
+
+    def do_summarize(self, channel, scope, user, topic=""):
         cfg = self._summarize_cfg()
-        if (cfg.get("provider") or "").lower() != "claude-cli" and not cfg.get("base_url"):
+        if not (cfg.get("provider") or cfg.get("base_url")):
             self.broadcast({"type": "summarizeSetup", "clis": self._available_clis()})
             return
         try:
-            lines = self._gather_lines(channel, scope, user, cfg)
-            if not lines:
+            gathered = self._gather_lines(channel, scope, user, cfg, use_visit=True)
+            if not gathered["lines"]:
                 self.broadcast({"type": "summaryError", "text": "Nothing to summarize in that range"})
                 return
-            summary = self._llm_summarize(cfg, "\n".join(lines))
+            summary = self._summarize_transcript(cfg, gathered["lines"], scope, topic)
             if not summary:
                 self.broadcast({"type": "summaryError", "text": "Summarize: empty response from provider"})
                 return
-            self.broadcast({"type": "summary", "text": summary})
+            self.broadcast({
+                "type": "summary", "text": summary,
+                "channel": channel, "channelName": self.chan_name.get(channel, ""),
+                "coverage": self._coverage_text(gathered["count"], gathered["start"], gathered["end"]),
+                "coverageCount": gathered["count"], "coverageStart": gathered["start"], "coverageEnd": gathered["end"],
+                "topic": topic,
+            })
         except Exception as e:
             print(f"dsqrd: summarize EXC {e!r}", flush=True)
             self.broadcast({"type": "summaryError", "text": f"Summarize failed: {e}"})
@@ -1363,16 +1767,17 @@ class DQS:
         if not question:
             return
         cfg = self._summarize_cfg()
-        if (cfg.get("provider") or "").lower() != "claude-cli" and not cfg.get("base_url"):
+        if not (cfg.get("provider") or cfg.get("base_url")):
             self.broadcast({"type": "summarizeSetup", "clis": self._available_clis()})
             return
         try:
-            lines = self._gather_lines(channel, scope, user, cfg)
-            if not lines:
+            gathered = self._gather_lines(channel, scope, user, cfg)
+            if not gathered["lines"]:
                 self.broadcast({"type": "summaryError", "text": "No conversation in that range"})
                 return
-            answer = self._llm_call(cfg, ANSWER_SYS,
-                                    "Question: " + question + "\n\nConversation transcript:\n" + "\n".join(lines))
+            answer = self._llm_call(cfg, ANSWER_SYS + "\n\nThis transcript is " + span_label(scope)
+                                    + ". Today is " + datetime.now().astimezone().strftime("%A %-d %B %Y") + ".",
+                                    "Question: " + question + "\n\nConversation transcript:\n" + "\n".join(gathered["lines"]))
             if not answer:
                 self.broadcast({"type": "summaryError", "text": "Ask: empty response from provider"})
                 return
@@ -2079,6 +2484,7 @@ class DQS:
             ws = m.get("guild_id") or DM_WS
             self.chan_guild[cid] = ws
         if op in ("MESSAGE_CREATE", "MESSAGE_CREATE_QUICK", "MESSAGE_UPDATE"):
+            self._note_latest(cid, m)
             if self.learn_participant(cid, m) and cid == self.active_ch:
                 self.broadcast({"type": "users", "users": self.users_payload(cid)})
             mm = map_msg(m)
@@ -2217,20 +2623,6 @@ class DQS:
                    or self.chan_name.get(cid) or "someone")
             self.broadcast({"type": "typing", "channel": cid, "user": who})
 
-    def watch_focus(self):
-        """Track whether our client window is focused (suppress its notifications
-        only then). Polls niri's focused window title."""
-        while True:
-            try:
-                out = subprocess.run(["niri", "msg", "--json", "focused-window"],
-                                     capture_output=True, text=True, timeout=3).stdout
-                w = json.loads(out) if out.strip() else None
-                active = bool(w) and (w.get("title") == "dsqrd")
-            except Exception:
-                active = False
-            self.app_active = active   # used to suppress notifications for the open channel
-            time.sleep(1)
-
     def heartbeat(self):
         while True:
             time.sleep(3)
@@ -2256,14 +2648,40 @@ class DQS:
                     continue
                 t = cmd.get("type")
                 ch = cmd.get("channel")
-                if t in ("recent", "focus"):
-                    self.active_ch = ch or None
+                if t == "startAuth":
+                    self.start_auth()
+                    continue
+                if t == "cancelAuth":
+                    self.cancel_auth()
+                    continue
+                if not self.signed_in:
+                    continue
+                if t == "recent":
+                    next_ch = ch or None
+                    if next_ch != self.active_ch:
+                        if self.app_active:
+                            self._leave_visit(self.active_ch)
+                        self.active_ch = next_ch
+                        if self.app_active:
+                            self._enter_visit(self.active_ch)
+                if t == "focus":
+                    next_ch = ch or None
+                    next_active = cmd.get("active") is True
+                    if self.app_active and (not next_active or next_ch != self.active_ch):
+                        self._leave_visit(self.active_ch)
+                    if next_active and (not self.app_active or next_ch != self.active_ch):
+                        self._enter_visit(next_ch)
+                    self.active_ch = next_ch
+                    self.app_active = next_active
+                    self.focus_conn = conn if self.app_active else None
                 if t == "recent":
                     threading.Thread(target=self.send_recent, args=(conn, ch), daemon=True).start()
                 elif t == "history":
                     threading.Thread(target=self.send_history, args=(conn, ch, cmd.get("before")), daemon=True).start()
                 elif t == "summarize" and ch:
-                    threading.Thread(target=self.do_summarize, args=(ch, cmd.get("scope"), cmd.get("user")), daemon=True).start()
+                    threading.Thread(target=self.do_summarize,
+                                     args=(ch, cmd.get("scope"), cmd.get("user"), cmd.get("topic") or ""),
+                                     daemon=True).start()
                 elif t == "ask" and ch:
                     threading.Thread(target=self.do_ask, args=(ch, cmd.get("scope"), cmd.get("user"), cmd.get("question")), daemon=True).start()
                 elif t == "summarizeEnable":
@@ -2312,19 +2730,23 @@ class DQS:
                         # rejection must not toast. ack() already retries 5xx.
                         threading.Thread(target=self.discord.ack, args=(ch, str(before)), daemon=True).start()
                 elif t == "open" and ch:
-                    # Deep-link from outside the client: navigate the UI to a
-                    # channel, exactly as a clicked notification does. Reuses
-                    # the same broadcast as _on_notif_activate, so there is no
-                    # second navigation path to keep in sync.
+                    # Deep-link from outside the client (a CLI, a cross-app digest):
+                    # navigate the UI to a channel, reusing the exact broadcast a
+                    # clicked notification produces — so there's no second navigation
+                    # path to keep in sync. Unknown ids are rejected rather than
+                    # broadcast: the UI clears its state to switch workspace, so a
+                    # typo'd id would blank the view with nothing to load.
                     #
-                    # Deliberately does NOT touch self.active_ch — that is the
-                    # daemon's belief about what the UI is *showing*, used to
-                    # suppress notifications. The UI sets it via "recent" once
-                    # it has actually switched, which is the only moment it is
-                    # true. Setting it here would suppress notifications for a
-                    # channel nobody has opened yet.
-                    self.broadcast({"type": "open", "workspace": cmd.get("workspace") or "",
-                                    "channel": ch, "thread": cmd.get("thread") or ""})
+                    # Deliberately does NOT touch self.active_ch. That is the daemon's
+                    # belief about what the UI is *showing* and it suppresses
+                    # notifications; only "recent" can honestly set it, once the UI has
+                    # really switched. Setting it here would silence a channel nobody
+                    # has open yet.
+                    if ch in self.chan_guild:
+                        self.broadcast({"type": "open", "workspace": self.chan_guild.get(ch, ""),
+                                        "channel": ch, "thread": cmd.get("thread") or ""})
+                    else:
+                        self.write(conn, {"type": "toast", "text": f"Unknown channel {ch}"})
                 elif t == "typing" and ch:
                     threading.Thread(target=self.discord.send_typing, args=(ch,), daemon=True).start()
                 elif t == "view" and (cmd.get("images") or cmd.get("url")):
@@ -2387,7 +2809,11 @@ class DQS:
                 elif t == "profile" and cmd.get("user"):
                     threading.Thread(target=self.do_profile,
                                      args=(conn, str(cmd["user"]), cmd.get("workspace", "")), daemon=True).start()
-                # focus is a no-op (tracked above for notification suppression)
+                # focus is handled above for notification suppression
+        if self.focus_conn is conn:
+            self._leave_visit(self.active_ch)
+            self.app_active = False
+            self.focus_conn = None
         self.drop(conn)
 
     def serve(self):
@@ -2643,9 +3069,7 @@ class DQS:
                 self.broadcast({"type": "resync"})
             mono, wall = m, w
 
-    def run(self):
-        threading.Thread(target=self.gateway.connect, daemon=True).start()
-        self.wait_ready()
+    def _start_workers(self):
         try:
             self.notifier = Notifier("Discord", self._on_notif_activate)
         except Exception as e:
@@ -2654,11 +3078,14 @@ class DQS:
         threading.Thread(target=self.drain_gateway, daemon=True).start()
         threading.Thread(target=self.drain_typing, daemon=True).start()
         threading.Thread(target=self.drain_presence, daemon=True).start()
-        threading.Thread(target=self.watch_focus, daemon=True).start()
         threading.Thread(target=self.watch_wake, daemon=True).start()
         threading.Thread(target=self.heartbeat, daemon=True).start()
         threading.Thread(target=self.check_updates, daemon=True).start()
         threading.Thread(target=self.refresh_guilds, daemon=True).start()
+
+    def run(self):
+        if self.token:
+            threading.Thread(target=self._connect_stored, daemon=True).start()
         self.serve()
 
 

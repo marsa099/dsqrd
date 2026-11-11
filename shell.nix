@@ -9,6 +9,9 @@ pkgs.mkShell {
       filetype
       protobuf
       jeepney
+      pycryptodome
+      qrcode
+      pillow
     ]))
     # the daemon shells out for upload compression and voice notes
     pkgs.ffmpeg

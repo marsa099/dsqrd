@@ -43,7 +43,10 @@ ListView {
 
     // When the viewport shrinks (e.g. the typing row appears above the composer)
     // keep the newest message visible instead of letting it slide under.
-    onHeightChanged: if (stick) Qt.callLater(pinBottomView)
+    onHeightChanged: Qt.callLater(function() {
+        list.forceLayout()
+        if (list.stick) list.pinBottomView()
+    })
 
     ScrollFeel {
         flick: list

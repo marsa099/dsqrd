@@ -3,10 +3,12 @@ singleton Theme Theme.qml
 singleton Html Html.qml
 singleton Motion Motion.qml
 Icon Icon.qml
+PrimaryButton PrimaryButton.qml
 KeyCap KeyCap.qml
 CapLabel CapLabel.qml
 FeedbackPill FeedbackPill.qml
 Card Card.qml
+ContrastSurface ContrastSurface.qml
 Dropdown Dropdown.qml
 ScrollFeel ScrollFeel.qml
 Modal Modal.qml

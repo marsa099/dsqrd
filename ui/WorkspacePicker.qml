@@ -118,9 +118,7 @@ Item {
                     Rectangle {
                         anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14
                         anchors.topMargin: 1; anchors.bottomMargin: 1; radius: 13
-                        color: index === wp.sel ? Theme.selection : hov.hovered ? Theme.hover : "transparent"
-                        border.width: 1
-                        border.color: index === wp.sel ? Theme.hairline : "transparent"
+                        color: index === wp.sel ? Theme.itemCursor : hov.hovered ? Theme.itemHover : "transparent"
                     }
                     // Same accent-dot marker the worktree picker uses for the
                     // active entry — right-aligned here so the avatar chips

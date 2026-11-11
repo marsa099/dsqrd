@@ -52,8 +52,10 @@ FloatingWindow {
     // Discord instances apart (both share the org.quickshell app-id).
     title: (Quickshell.env("SLK_SOCK") === "dsqrd") ? "dsqrd" : "slqs"
 
-    // Window-focus tracking for notification suppression lives in slkd, which
-    // watches niri's event stream (FloatingWindow exposes no focus property).
+    Connections {
+        target: Qt.application
+        function onStateChanged() { Backend.sendFocus() }
+    }
 
     // ── vim modal state ──────────────────────────────────────────────────
     // The mirror of slk's internal/ui: a key router + panel focus. "Insert"
@@ -321,7 +323,7 @@ FloatingWindow {
                           help: () => win.isDiscord ? "Toggle sidebar" : "Browse channels", cat: "chats" },
             "s":        { act: () => sidebar.toggleStarCurrent(), help: "Star / unstar channel", cat: "chats" },
             "c":        { act: () => { if (win.isDiscord) summarizePicker.start() }, help: () => win.isDiscord ? "Agent — summarize or ask" : "", cat: "chats" },
-            "C":        { act: () => { if (win.isDiscord && Backend.lastSummaryText.length) { Backend.aiScope = Backend.lastSummaryScope; Backend.aiUser = Backend.lastSummaryUser; summaryModal.showWith(Backend.lastSummaryText, Backend.lastSummaryChannel) } },
+            "C":        { act: () => { if (win.isDiscord && Backend.lastSummaryText.length) { Backend.aiScope = Backend.lastSummaryScope; Backend.aiUser = Backend.lastSummaryUser; summaryModal.showWith(Backend.lastSummaryText, Backend.lastSummaryChannel, Backend.lastSummaryCoverage) } },
                           help: () => (win.isDiscord && Backend.lastSummaryText.length) ? "Open last summary" : "", cat: "chats" },
             "u":        { act: () => win.openUpload(), help: "Attach a file", cat: "chats" },
             // slqs only (Discord has no equivalent): d = DM anyone, I = invite to channel.
@@ -339,12 +341,14 @@ FloatingWindow {
             "i":        { act: () => { focusPanel("messages"); composer.focusInput() }, help: "Compose", cat: "msg" },
             "R":        { act: () => { if (focusedPanel === "messages") { composer.startReply(msgs.currentMessage()); focusPanel("messages") } }, help: () => Backend.hasThreads ? "Reply in thread" : "Reply to message", cat: "msg" },
             "e":        { act: () => { if (focusedPanel === "messages") { const m = msgs.currentMessage(); if (m && m.mine) composer.startEdit(m) } }, help: "Edit your message", cat: "msg" },
-            "D":        { act: () => { if (focusedPanel === "messages") askDelete(msgs.currentMessage()) }, help: "Delete your message", cat: "msg" },
+            "D":        { act: () => { if (focusedPanel !== "messages") return; const m = msgs.currentMessage(); if (!m) return; if (win.isDiscord && !m.mine) Backend.toggleMessageHidden(m); else askDelete(m) }, help: () => win.isDiscord ? "Delete yours / hide others" : "Delete your message", cat: "msg" },
+            "H":        { act: () => { if (win.isDiscord) hideFilter.showFilter() }, help: () => win.isDiscord ? "Hide matching text" : "", cat: "msg" },
             "S":        { act: () => { if (focusedPanel !== "messages") return; const m = msgs.currentMessage(); const f = Backend.fileAttachment(m); if (f) Backend.downloadFile(f); else Backend.downloadMedia(m) }, help: "Save media", cat: "msg" },
             "r":        { act: () => { if (focusedPanel === "messages") reactTo(msgs.currentMessage())
                                        else if (focusedPanel === "sidebar") sidebar.markCurrentRead() },
                           help: () => focusedPanel === "sidebar" ? "Mark channel read" : "React", cat: "chats" },
             "A":        { act: () => { if (Backend.isSlack && focusedPanel === "messages") Backend.ackIncident(msgs.currentMessage()) }, help: () => Backend.isSlack ? "Acknowledge (incident.io)" : "", cat: "msg" },
+            "a":        { act: () => { if (Backend.messageActionEnabled && focusedPanel === "messages") Backend.runMessageAction(msgs.currentMessage()) }, help: () => Backend.messageActionEnabled ? "Custom message action" : "", cat: "msg" },
             "y":        { act: () => { if (focusedPanel === "messages") Backend.copyText(msgs.currentMessage()) }, help: "Copy text", cat: "msg" },
             "o":        { act: () => { if (focusedPanel === "messages") win.openMsgLinks(msgs.currentMessage(), false) }, help: "Open link", cat: "msg" },
             "O":        { act: () => { if (focusedPanel === "messages") win.openMsgLinks(msgs.currentMessage(), true) }, help: "Open all links", cat: "msg" },
@@ -410,8 +414,10 @@ FloatingWindow {
             "r":      { act: () => reactTo(thread.currentMessage()), help: "React", cat: "msg" },
             "y":      { act: () => Backend.copyText(thread.currentMessage()), help: "Copy text", cat: "msg" },
             "Y":      { act: () => Backend.copyLink(thread.currentMessage()), help: "Copy message link", cat: "msg" },
+            "a":      { act: () => { if (Backend.messageActionEnabled) Backend.runMessageAction(thread.currentMessage()) }, help: () => Backend.messageActionEnabled ? "Custom message action" : "", cat: "msg" },
             "e":      { act: () => { const m = thread.currentMessage(); if (m && m.mine) thread.startEdit(m) }, help: "Edit your message", cat: "msg" },
-            "D":      { act: () => askDelete(thread.currentMessage()), help: "Delete your message", cat: "msg" },
+            "D":      { act: () => { const m = thread.currentMessage(); if (!m) return; if (win.isDiscord && !m.mine) Backend.toggleMessageHidden(m); else askDelete(m) }, help: () => win.isDiscord ? "Delete yours / hide others" : "Delete your message", cat: "msg" },
+            "H":      { act: () => { if (win.isDiscord) hideFilter.showFilter() }, help: () => win.isDiscord ? "Hide matching text" : "", cat: "msg" },
             "S":      { act: () => { const m = thread.currentMessage(); const f = Backend.fileAttachment(m); if (f) Backend.downloadFile(f); else Backend.downloadMedia(m) }, help: "Save media", cat: "msg" },
             "ctrl+k": { act: () => palette.show(), help: "Jump palette", cat: "chats" },
             "ctrl+o": { act: () => Backend.toggleLastChannel(), help: "Last channel", cat: "chats" },
@@ -514,8 +520,9 @@ FloatingWindow {
 
         Rectangle {
             anchors.fill: parent
+            visible: Backend.authState === "signedIn"
             // reference layout: flat canvas, panes float as cards on it
-            color: Theme.bg_alt
+            color: Theme.bgDim
 
             Row {
                 id: mainRow
@@ -592,6 +599,7 @@ FloatingWindow {
                                   leftMargin: 4 + 8 * (1 - Math.min(1, sidebar.width / 264))
                                   rightMargin: 12; bottomMargin: 12 }
                         // focused-panel accent: the mlqs inbox hairline
+                        color: Theme.bg
                         border.width: 1
                         border.color: (win.focusedPanel === "messages" && !Backend.threadOpen)
                                     ? Theme.hairlineSoft : "transparent"
@@ -737,7 +745,7 @@ FloatingWindow {
                         Row {
                             id: sbRow; anchors.centerIn: parent; spacing: 8
                             Rectangle {
-                                width: 8; height: 8; radius: 4; color: Theme.cursor
+                                width: 8; height: 8; radius: 4; color: Theme.orange
                                 anchors.verticalCenter: parent.verticalCenter
                                 SequentialAnimation on opacity {
                                     running: Backend.summaryLoading; loops: Animation.Infinite
@@ -834,7 +842,7 @@ FloatingWindow {
                     Rectangle {
                         width: modeLabel.implicitWidth + 16; height: 22; radius: 7
                         anchors.verticalCenter: parent.verticalCenter
-                        color: win.insertMode ? Theme.cursor : Theme.green
+                        color: win.insertMode ? "#315C49" : Theme.green
                         Text { 
                             id: modeLabel; anchors.centerIn: parent
                             text: win.insertMode ? "INSERT" : "NORMAL"
@@ -923,6 +931,56 @@ FloatingWindow {
                 onOpenChanged: if (!open) win.backToNormal()
             }
 
+            Modal {
+                id: hideFilter
+                z: 102
+                panelWidth: Math.round(Math.min(440, width - 80))
+
+                function submit() {
+                    if (Backend.toggleHiddenTextFilter(filterInput.text)) close()
+                }
+                function showFilter() {
+                    filterInput.text = ""
+                    show()
+                    Qt.callLater(filterInput.forceActiveFocus)
+                }
+
+                onClosed: win.backToNormal()
+
+                header: Text {
+                    width: parent.width
+                    text: "What do you want to hide?"
+                    color: Theme.fg
+                    font.family: Theme.fontFamily; font.pixelSize: 16; font.weight: 500
+                }
+                footer: Text {
+                    text: "enter  add / remove exact filter    esc  cancel"
+                    color: Theme.fg_muted
+                    font.family: Theme.fontFamily; font.pixelSize: 12
+                }
+                Rectangle {
+                    width: parent.width; height: 44; radius: 12
+                    color: Theme.surface
+                    border.width: filterInput.activeFocus ? 1.5 : 1
+                    border.color: filterInput.activeFocus ? Theme.hairline : Theme.hairlineSoft
+                    TextInput {
+                        id: filterInput
+                        anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14
+                        verticalAlignment: TextInput.AlignVCenter
+                        color: Theme.fg; clip: true; selectByMouse: true
+                        font.family: Theme.fontFamily; font.pixelSize: 14
+                        onAccepted: hideFilter.submit()
+                        Keys.onEscapePressed: e => { hideFilter.close(); e.accepted = true }
+                        Text {
+                            visible: filterInput.text.length === 0
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "Match a string"
+                            color: Theme.fg_muted; font: filterInput.font
+                        }
+                    }
+                }
+            }
+
             ConfirmDialog {
                 id: confirmUnsub
                 z: 102
@@ -983,6 +1041,7 @@ FloatingWindow {
                 id: summarizePicker
                 z: 105
                 onChosen: (scope, user) => Backend.summarize(scope, user)
+                onTopicChosen: topic => Backend.summarizeTopic(topic)
                 onAsked: (scope, user, question) => Backend.ask(scope, user, question)
                 onOpenChanged: if (!open) win.backToNormal()
             }
@@ -993,7 +1052,7 @@ FloatingWindow {
                 onOpenChanged: if (!open) win.backToNormal()
                 Connections {
                     target: Backend
-                    function onSummaryReady() { summaryModal.showWith(Backend.summaryText, Backend.currentChannel) }
+                    function onSummaryReady() { summaryModal.showWith(Backend.summaryText, Backend.lastSummaryChannel, Backend.summaryCoverage) }
                     function onAnswerReady(question) { summaryModal.showAnswer(Backend.summaryText, question) }
                 }
             }
@@ -1044,6 +1103,11 @@ FloatingWindow {
                 }
             }
 
+        }
+
+        AuthPage {
+            anchors.fill: parent
+            visible: Backend.authState !== "signedIn"
         }
     }
 

@@ -107,9 +107,7 @@ Item {
                     Rectangle {   // inset + rounded highlight, clear of the box corners/border
                         anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14
                         anchors.topMargin: 1; anchors.bottomMargin: 1; radius: 13
-                        color: index === bp.sel ? Theme.selection : hov.hovered ? Theme.hover : "transparent"
-                        border.width: 1
-                        border.color: index === bp.sel ? Theme.hairline : "transparent"
+                        color: index === bp.sel ? Theme.itemCursor : hov.hovered ? Theme.itemHover : "transparent"
                     }
                     Row {
                         anchors.fill: parent; anchors.leftMargin: 16; anchors.rightMargin: 14; spacing: 9

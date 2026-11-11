@@ -3,3 +3,6 @@ websocket-client
 filetype
 protobuf
 jeepney
+pycryptodome
+qrcode
+pillow

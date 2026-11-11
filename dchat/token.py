@@ -30,3 +30,25 @@ def load_plain(profiles_path):
             return json.load(f)
     except Exception:
         return []
+
+
+def save_secret(token_value):
+    """Replace the selected keyring profile token, creating one when needed."""
+    try:
+        store = json.loads(load_secret() or "{}")
+    except Exception:
+        store = {}
+    if isinstance(store, list):
+        store = {"selected": "Discord", "profiles": store}
+    profiles = store.setdefault("profiles", [])
+    selected = store.get("selected") or "Discord"
+    store["selected"] = selected
+    profile = next((p for p in profiles if p.get("name") == selected), None)
+    if profile is None:
+        profile = {"name": selected}
+        profiles.append(profile)
+    profile["token"] = token_value
+    subprocess.run(
+        ["secret-tool", "store", "--label=dsqrd Discord profile", "service", SERVICE],
+        input=json.dumps(store), text=True, check=True,
+    )

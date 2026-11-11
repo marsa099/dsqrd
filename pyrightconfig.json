@@ -1,0 +1,21 @@
+{
+  "include": [
+    "dsqrd.py",
+    "dchat/remote_auth.py",
+    "dchat/token.py",
+    "tests"
+  ],
+  "ignore": [
+    "dchat/client_properties.py",
+    "dchat/discord.py",
+    "dchat/gateway.py",
+    "dchat/message.py",
+    "dchat/notifier.py",
+    "dchat/peripherals.py",
+    "dchat/user_settings_pb2.py",
+    "dchat/utils.py"
+  ],
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "none",
+  "reportMissingModuleSource": "none"
+}

@@ -3,7 +3,7 @@ import QsLib
 
 // Discord "agent" menu (the `c` key). Pick a range, then either summarize it
 // (↵) or ask a free-text question about it (a). Views:
-//   mode 0 — range list (session / all-new / last day / last week / a person)
+//   mode 0 — range list (all-new / last day / last week / a person)
 //   mode 1 — participant list (when the range is "a person")
 //   mode 2 — question input (after pressing `a` on a chosen range)
 // ↵ chooses, j/k move, a asks, h/⌫ steps back, esc closes.
@@ -13,10 +13,12 @@ Modal {
     property int sel: 0
     property var people: []
     property bool asking: false          // true once `a` started an ask flow
+    property bool summarizingTopic: false
     property string pendingScope: ""     // range captured for the ask
     property string pendingUser: ""
     property string pendingUserName: ""
     signal chosen(string scope, string user)
+    signal topicChosen(string topic)
     signal asked(string scope, string user, string question)
     panelWidth: Math.round(Math.min(520, sp.width - 80))
     maxHeightFrac: 0.6
@@ -24,17 +26,18 @@ Modal {
     chinBar: true
 
     readonly property var scopes: [
-        { key: "session",   label: "What's new (this conversation)" },
-        { key: "all_new",   label: "All new (since last read)" },
+        { key: "all_new",   label: "Since you last spoke" },
         { key: "last_day",  label: "Last day" },
         { key: "last_week", label: "Last week" },
         { key: "user",      label: "From a specific person…" },
+        { key: "topic",     label: "Summarize a topic…" },
     ]
     readonly property var rows: mode === 0 ? scopes : (mode === 1 ? people : [])
 
     function start() {
         mode = 0; sel = 0; people = []
-        asking = false; pendingScope = ""; pendingUser = ""; pendingUserName = ""
+        asking = false; summarizingTopic = false
+        pendingScope = ""; pendingUser = ""; pendingUserName = ""
         questionInput.focus = false; questionInput.text = ""   // list nav owns the keyboard
         show()
     }
@@ -49,7 +52,9 @@ Modal {
         if (sp.mode !== 2) return
         const q = questionInput.text.trim()
         if (!q.length) return
-        sp.asked(pendingScope, pendingUser, q); sp.close()
+        if (summarizingTopic) sp.topicChosen(q)
+        else sp.asked(pendingScope, pendingUser, q)
+        sp.close()
     }
 
     // ↵ — summarize (or, mid ask-flow, advance to the question)
@@ -57,6 +62,7 @@ Modal {
         if (mode === 0) {
             const s = scopes[sel]; if (!s) return
             if (s.key === "user") { people = Backend.searchUsers("", 100); sel = 0; mode = 1; return }
+            if (s.key === "topic") { summarizingTopic = true; pendingScope = "last_week"; _toAsk(); return }
             if (asking) { pendingScope = s.key; _toAsk(); return }
             sp.chosen(s.key, ""); sp.close()
         } else if (mode === 1) {
@@ -72,6 +78,7 @@ Modal {
             const s = scopes[sel]; if (!s) return
             asking = true
             if (s.key === "user") { people = Backend.searchUsers("", 100); sel = 0; mode = 1; return }
+            if (s.key === "topic") { asking = false; summarizingTopic = true; pendingScope = "last_week"; _toAsk(); return }
             pendingScope = s.key; _toAsk()
         } else if (mode === 1) {
             const p = people[sel]; if (!p) return
@@ -83,7 +90,7 @@ Modal {
         width: parent.width; height: 24
         Text {
             anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
-            text: sp.mode === 2 ? "Ask a question" : (sp.mode === 1 ? "From which person?" : "Agent")
+            text: sp.mode === 2 ? (sp.summarizingTopic ? "Summarize a topic" : "Ask a question") : (sp.mode === 1 ? "From which person?" : "Agent")
             color: Theme.fg
             font.family: Theme.fontFamily; font.hintingPreference: Font.PreferNoHinting
             font.pixelSize: 15; font.weight: 600
@@ -108,7 +115,7 @@ Modal {
             CapLabel { visible: sp.mode !== 2; anchors.verticalCenter: parent.verticalCenter; text: "move" }
             Item { visible: sp.mode !== 2; width: 10; height: 1 }
             KeyCap { anchors.verticalCenter: parent.verticalCenter; small: true; text: "↵" }
-            CapLabel { anchors.verticalCenter: parent.verticalCenter; text: sp.mode === 2 ? "ask" : "summarize" }
+            CapLabel { anchors.verticalCenter: parent.verticalCenter; text: sp.mode === 2 ? (sp.summarizingTopic ? "summarize" : "ask") : "summarize" }
             Item { visible: sp.mode !== 2; width: 10; height: 1 }
             KeyCap { visible: sp.mode !== 2; anchors.verticalCenter: parent.verticalCenter; small: true; text: "a" }
             CapLabel { visible: sp.mode !== 2; anchors.verticalCenter: parent.verticalCenter; text: "ask" }
@@ -153,9 +160,7 @@ Modal {
                     anchors.leftMargin: 4; anchors.rightMargin: 4
                     anchors.topMargin: 1; anchors.bottomMargin: 1
                     radius: 13
-                    color: row.index === sp.sel ? Theme.selection : hov.hovered ? Theme.surface : "transparent"
-                    border.width: 1
-                    border.color: row.index === sp.sel ? Theme.hairline : "transparent"
+                    color: row.index === sp.sel ? Theme.itemCursor : hov.hovered ? Theme.itemHover : "transparent"
                 }
                 Text {
                     anchors.left: parent.left; anchors.leftMargin: 18
@@ -189,11 +194,11 @@ Modal {
                     color: Theme.fg; clip: true; selectByMouse: true
                     font.family: Theme.fontFamily; font.pixelSize: 14
                     onAccepted: sp._submitAsk()
-                    Keys.onEscapePressed: ev => { sp.mode = (sp.pendingScope === "user" ? 1 : 0); sp.asking = false; ev.accepted = true }
+                    Keys.onEscapePressed: ev => { sp.mode = (sp.pendingScope === "user" ? 1 : 0); sp.asking = false; sp.summarizingTopic = false; ev.accepted = true }
                     Text {
                         visible: !questionInput.text
                         anchors.verticalCenter: parent.verticalCenter
-                        text: "Ask about this conversation…"; color: Theme.fg_muted
+                        text: sp.summarizingTopic ? "Topic to summarize…" : "Ask about this conversation…"; color: Theme.fg_muted
                         font: questionInput.font
                     }
                 }

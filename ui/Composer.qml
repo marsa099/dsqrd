@@ -7,20 +7,22 @@ Rectangle {
     id: root
     readonly property bool attaching: Backend.attachState !== "none"
     readonly property bool replying: replyTs !== "" || editingTs !== ""
+    readonly property bool actionsFillIdle: !attaching && !replying && input.lineCount <= 1
+    readonly property real actionSize: actionsFillIdle ? Math.max(34, height - 12) : 34
     // Grow with the text, capped at 180px; a single line's natural implicitHeight
     // is the minimum (no artificial floor). Matches the thread reply input.
     implicitHeight: Math.min(180, input.implicitHeight + 26 + (((attaching && !Backend.threadOpen) || replying) ? 26 : 0))
     radius: Theme.radiusInner
-    // Insert mode = the desktop focus language (the docs' nav-focus): solid
-    // ink-tint fill + a strong neutral ring. Full inversion read too heavy.
     readonly property bool focused: input.focus
     readonly property color inkFg: Theme.fg
     readonly property color inkMuted: Theme.fg_muted
-    color: focused ? Theme.tintFill : Theme.surface
-    border.color: focused ? (Theme.mode === "light" ? Theme.fg : "#FFFFFF") : Theme.hairline
-    border.width: focused ? 1.5 : 1
-    Behavior on color { ColorAnimation { duration: 120 } }
-    Behavior on border.color { ColorAnimation { duration: 120 } }
+    readonly property color activeRing: Theme.mode === "light"
+        ? Theme.ink
+        : Qt.hsla(0.583, 0.29, 0.90, 1)
+    color: Theme.bg
+    border.color: focused ? activeRing : Theme.hairline
+    border.width: 2
+    Behavior on border.color { ColorAnimation { duration: 650; easing.type: Easing.InOutQuad } }
 
     signal exitInsert()
     signal openPalette()   // Ctrl+K from insert mode → jump palette (drops to normal)
@@ -124,7 +126,10 @@ Rectangle {
     Flickable {
         id: flick
         anchors { left: parent.left; right: parent.right; top: parent.top; bottom: parent.bottom
-                  leftMargin: 14; rightMargin: Backend.railHidden ? 90 : 50; topMargin: 12 + (((root.attaching && !Backend.threadOpen) || root.replying) ? 24 : 0); bottomMargin: 12 }
+                  leftMargin: 14; rightMargin: Backend.railHidden
+                      ? sendBtn.width + sumBtn.width + 20
+                      : sendBtn.width + 14
+                  topMargin: 12 + (((root.attaching && !Backend.threadOpen) || root.replying) ? 24 : 0); bottomMargin: 12 }
         contentHeight: input.implicitHeight; clip: true
         // keep the cursor in view once the text grows past the visible cap
         function ensureVisible(r) {
@@ -201,38 +206,32 @@ Rectangle {
     }
 
     // send button
-    Rectangle {
+    PrimaryButton {
         id: sendBtn
-        anchors.right: parent.right; anchors.rightMargin: 8
-        anchors.bottom: parent.bottom; anchors.bottomMargin: 8
-        width: 32; height: 32; radius: Theme.radiusSm
-        readonly property bool on: input.text.trim().length > 0
-        color: on ? Theme.cursor : Qt.rgba(Theme.fg.r, Theme.fg.g, Theme.fg.b, 0.06)
-        Behavior on color { ColorAnimation { duration: 120 } }
-        Icon { name: "paper-plane-2"; width: 15; height: 15; anchors.centerIn: parent
-               color: parent.on ? Theme.ink : root.inkMuted }
-        TapHandler { onTapped: root.send() }
+        anchors.right: parent.right; anchors.rightMargin: 6
+        anchors.bottom: parent.bottom; anchors.bottomMargin: root.actionsFillIdle ? 6 : 8
+        width: root.actionSize; height: root.actionSize; radius: Theme.radiusSm
+        primary: true
+        iconName: "paper-plane-2"
+        enabled: input.text.trim().length > 0
+        onClicked: root.send()
     }
 
     // summarize-while-away button, left of send — Discord only (the daemon verb
-    // exists only in dsqrd). Opens the scope picker; spins while summarizing.
-    Rectangle {
+    // exists only in dsqrd). Opens the scope picker; its pinecone animates while summarizing.
+    PrimaryButton {
         id: sumBtn
         visible: Backend.railHidden
         anchors.right: sendBtn.left; anchors.rightMargin: 6
-        anchors.bottom: parent.bottom; anchors.bottomMargin: 8
-        width: 32; height: 32; radius: Theme.radiusSm
-        color: (Backend.summaryLoading || hovSum.hovered) ? Theme.hover : Qt.rgba(Theme.fg.r, Theme.fg.g, Theme.fg.b, 0.06)
-        Behavior on color { ColorAnimation { duration: 120 } }
-        Icon { name: "sparkle-3"; width: 15; height: 15; anchors.centerIn: parent
-               color: root.inkMuted; visible: !Backend.summaryLoading }
-        Spinner {
-            anchors.centerIn: parent
-            visible: Backend.summaryLoading
+        anchors.bottom: parent.bottom; anchors.bottomMargin: root.actionsFillIdle ? 6 : 8
+        width: root.actionSize; height: root.actionSize; radius: Theme.radiusSm
+        primary: false
+        onClicked: if (!Backend.summaryLoading) root.openSummarize()
+        PineconeIcon {
+            width: 21; height: 21; anchors.centerIn: parent
+            color: sumBtn.contentColor
+            activeColor: Theme.mode === "dark" ? Theme.orange : Theme.electric
             running: Backend.summaryLoading
-            color: root.inkFg
         }
-        HoverHandler { id: hovSum }
-        TapHandler { enabled: !Backend.summaryLoading; onTapped: root.openSummarize() }
     }
 }

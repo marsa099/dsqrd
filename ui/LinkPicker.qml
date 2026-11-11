@@ -13,7 +13,7 @@ Modal {
     signal chosenAll()          // open every link (shell reads lp.links)
     panelWidth: Math.round(Math.min(680, lp.width - 80))
     maxHeightFrac: 0.6
-    panelColor: Theme.bg   // like the other pickers, so Theme.selection reads
+    panelColor: Theme.bg   // like the other pickers, so item highlights read
     chinBar: true
 
     function openFor(urls) { links = urls; sel = 0; show() }
@@ -81,7 +81,7 @@ Modal {
                 width: parent.width
                 height: 40
                 // Same inset, rounded selection highlight the other pickers use:
-                // Theme.selection + hairline border when current, Theme.hover on hover.
+                // Semantic cursor + hairline border when current, semantic hover on hover.
                 Rectangle {
                     anchors.fill: parent
                     anchors.leftMargin: 4; anchors.rightMargin: 4
@@ -89,9 +89,7 @@ Modal {
                     radius: 13
                     // Exact base-Picker row highlight (modules/Picker.qml): selection
                     // fill + hairline border when current, surface tint on hover.
-                    color: row.index === lp.sel ? Theme.selection : hov.hovered ? Theme.surface : "transparent"
-                    border.width: 1
-                    border.color: row.index === lp.sel ? Theme.hairline : "transparent"
+                    color: row.index === lp.sel ? Theme.itemCursor : hov.hovered ? Theme.itemHover : "transparent"
                 }
                 Row {
                     anchors.fill: parent; anchors.leftMargin: 18; anchors.rightMargin: 18

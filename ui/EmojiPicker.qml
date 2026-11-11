@@ -135,9 +135,7 @@ Item {
                     Rectangle {
                         anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14
                         anchors.topMargin: 1; anchors.bottomMargin: 1; radius: 13
-                        color: index === picker.sel ? Theme.selection : hov.hovered ? Theme.hover : "transparent"
-                        border.width: 1
-                        border.color: index === picker.sel ? Theme.hairline : "transparent"
+                        color: index === picker.sel ? Theme.itemCursor : hov.hovered ? Theme.itemHover : "transparent"
                     }
                     // Content is top-anchored (not centered) so a selected reaction row can
                     // grow downward as its reactor list wraps, without overlapping neighbours.

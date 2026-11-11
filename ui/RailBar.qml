@@ -29,7 +29,7 @@ Rectangle {
                 required property var modelData
                 readonly property bool active: modelData.id === Backend.currentWorkspace
                 width: 40; height: 40; radius: active ? 12 : 20
-                color: active ? Theme.selection : tileHov.hovered ? Theme.hover : Theme.hover
+                color: active ? Theme.itemSelected : tileHov.hovered ? Theme.itemHover : Theme.hover
                 Behavior on radius { NumberAnimation { duration: 110 } }
                 Behavior on color { ColorAnimation { duration: 90 } }
 
