@@ -849,8 +849,10 @@ class DQS:
         self.conns = []
         self.lock = threading.Lock()
         self.update_event = None   # latest updateAvailable event, replayed to new clients
-        self._update_etag = None   # GitHub ETag: conditional requests are free
+        self._update_cache = {}   # URL -> (ETag, response); never share validators across URLs
+        self._update_compare_bases = {}   # advertised target -> published installed baseline
         self._last_update_check = 0.0
+        self._update_lock = threading.Lock()
         self.prefs = _load_prefs()   # persisted UI prefs, replayed on bootstrap
         self._prefs_lock = threading.Lock()
 
@@ -2366,6 +2368,8 @@ class DQS:
                     threading.Thread(target=self.do_compress_upload, args=(ch, cmd.get("thread"), cmd.get("path"), ev), daemon=True).start()
                 elif t == "dropAttach" and ch:
                     self.pending_attach.pop(ch, None)
+                elif t == "checkUpdate":
+                    threading.Thread(target=self._check_update_once, args=(conn,), daemon=True).start()
                 elif t == "savePrefs":
                     # UI persists a prefs patch (sidebar/recents/last channel);
                     # merge + write so it survives the next update-restart
@@ -2420,32 +2424,36 @@ class DQS:
             threading.Thread(target=self._check_update_once, daemon=True).start()
         self.read_conn(conn)
 
-    def _check_update_once(self):
+    def _check_update_once(self, conn=None):
         """Background poll: detect a newer build and push an `updateAvailable`
         event, staying silent on errors / up-to-date. ETag-conditional, so a 304
         (nothing moved) is free against GitHub's 60/h unauthenticated limit."""
         if not GIT_REV:
+            if conn:
+                self.write(conn, {"type": "toast", "text": "No installed revision; updates disabled"})
+            return
+        if not self._update_lock.acquire(blocking=False):
+            if conn:
+                self.write(conn, {"type": "toast", "text": "Update check already running"})
             return
         self._last_update_check = time.time()
         try:
-            self._poll_update()
-        except urllib.error.HTTPError as e:
-            if e.code != 304:   # 304 = unchanged (ETag hit); anything else: retry next cycle
-                pass
+            latest = self._poll_update()
+            if conn:
+                self.write(conn, {"type": "toast", "text": "Update available" if latest else "Up to date"})
         except Exception:
-            pass
+            # A network/API error is unknown, NOT up-to-date. Preserve the badge.
+            if conn:
+                self.write(conn, {"type": "toast", "text": "Update check failed; try again later"})
+        finally:
+            self._update_lock.release()
 
     def _poll_update(self):
         """Core check. Returns the sha to build toward, or None when current.
 
-        A fork signals on two legs: (1) our binary is behind the repo we build
-        from, or (2) upstream has commits we haven't merged yet — both are
-        things `update-dsqrd` resolves. One `compare` call answers both. A stock
-        build (no DSQRD_UPSTREAM_REPO) falls back to a plain main-SHA poll.
-
-        Checking `daphen/dsqrd` unconditionally, as a stock build does, is wrong
-        for a fork: our build sha only exists in the fork, so it never equals
-        upstream's tip and the badge latches on permanently."""
+        Compare ancestry, not SHA inequality: a local merge or a build ahead
+        of the remote is not an update. Fork installs check both remote legs.
+        Any failed leg leaves the previous event intact (the caller retries)."""
         repo = os.environ.get("DSQRD_UPDATE_REPO", "daphen/dsqrd")
         upstream = os.environ.get("DSQRD_UPSTREAM_REPO", "")
         latest = (self._check_fork(repo, upstream)
@@ -2462,36 +2470,61 @@ class DQS:
         return latest
 
     def _gh(self, url, accept="application/vnd.github+json"):
-        """GET a GitHub API URL, ETag-conditional via self._update_etag. Returns
-        the sha string (sha media type) or parsed JSON; raises HTTPError(304)
-        when nothing changed since the last check."""
+        """Conditional GET with a separate validator AND cached body per URL.
+
+        A 304 is a successful unchanged response, not evidence of no update.
+        Retaining the body is essential when polling both fork and upstream.
+        """
+        key = (url, accept)
+        etag, cached = self._update_cache.get(key, (None, None))
         headers = {"User-Agent": "dsqrd", "Accept": accept}
-        if self._update_etag:
-            headers["If-None-Match"] = self._update_etag
-        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=15) as r:
-            self._update_etag = r.headers.get("ETag") or self._update_etag
-            body = r.read()
-        return body.decode().strip() if accept.endswith(".sha") else json.loads(body.decode())
+        if etag:
+            headers["If-None-Match"] = etag
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=15) as r:
+                body = r.read()
+                data = body.decode().strip() if accept.endswith(".sha") else json.loads(body.decode())
+                self._update_cache[key] = (r.headers.get("ETag"), data)
+                return data
+        except urllib.error.HTTPError as e:
+            if e.code == 304 and cached is not None:
+                e.close()
+                return cached
+            raise
 
     def _check_plain(self, repo):
-        """Stock build: the target is the repo's main SHA if it differs from our
-        build, else None."""
-        latest = self._gh(f"https://api.github.com/repos/{repo}/commits/main",
-                          "application/vnd.github.sha")
-        return latest if latest and latest != GIT_REV else None
+        """Only advertise remote commits missing from the installed build."""
+        base = os.environ.get("DSQRD_FORK_REV") or GIT_REV
+        return self._missing_commits(repo, base, "main")
 
     def _check_fork(self, repo, upstream):
-        """Fork build: one compare (our main .. upstream main) covers both legs —
-        base_commit is our fork main tip; ahead_by/commits is upstream's lead.
-        Returns the sha to build toward, or None when current on both legs."""
-        head = upstream.split("/")[0] + ":main"   # cross-repo head, e.g. daphen:main
-        cmp = self._gh(f"https://api.github.com/repos/{repo}/compare/main...{head}")
-        fork_tip = (cmp.get("base_commit") or {}).get("sha", "")
-        if fork_tip and fork_tip != GIT_REV:
-            return fork_tip                        # build the fork first
-        if cmp.get("ahead_by", 0) > 0:             # else: upstream has unmerged commits
-            commits = cmp.get("commits") or []
-            return commits[-1]["sha"] if commits else None
+        """Check both installed baselines, including unpublished local merges.
+
+        The local installer records the remote tips actually included in its
+        merge. Those SHAs remain queryable on GitHub even when the installed
+        merge commit has never been pushed. Nix builds use their published rev.
+        """
+        fork_base = os.environ.get("DSQRD_FORK_REV") or GIT_REV
+        upstream_base = os.environ.get("DSQRD_UPSTREAM_REV") or GIT_REV
+        fork_update = self._missing_commits(repo, fork_base, "main")
+        head = upstream.split("/")[0] + ":main"
+        upstream_update = self._missing_commits(repo, upstream_base, head, head_repo=upstream)
+        return fork_update or upstream_update
+
+    def _missing_commits(self, repo, base, head, head_repo=None):
+        comparison = self._gh(f"https://api.github.com/repos/{repo}/compare/{base}...{head}")
+        # GitHub counts head-only commits even for diverged branches. Behind
+        # and identical mean the installed build already contains the remote.
+        if comparison["ahead_by"] > 0:
+            # Compare responses can truncate the commit list; resolve the head
+            # explicitly rather than mistaking the last listed commit for tip.
+            # owner:branch is valid for compare, but NOT for the commits API.
+            tip_repo = head_repo or repo
+            tip_ref = head.split(":", 1)[-1]
+            latest = self._gh(f"https://api.github.com/repos/{tip_repo}/commits/{tip_ref}",
+                              "application/vnd.github.sha")
+            self._update_compare_bases[latest] = base
+            return latest
         return None
 
     def _emit_update(self, latest):
@@ -2517,7 +2550,10 @@ class DQS:
         to commit subjects. Newest-first, cap 30. Best-effort: [] on failure."""
         try:
             repo = os.environ.get("DSQRD_UPDATE_REPO", "daphen/dsqrd")
-            api = f"https://api.github.com/repos/{repo}/compare/{current}...{latest}"
+            # A locally merged installed commit need not exist on GitHub.
+            # Use the published baseline for the leg that advertised this tip.
+            base = self._update_compare_bases.get(latest, current)
+            api = f"https://api.github.com/repos/{repo}/compare/{base}...{latest}"
             headers = {"User-Agent": "dsqrd", "Accept": "application/vnd.github+json"}
             with urllib.request.urlopen(urllib.request.Request(api, headers=headers), timeout=15) as r:
                 data = json.loads(r.read().decode())
@@ -2541,7 +2577,7 @@ class DQS:
 
     def check_updates(self):
         """Tell the client when a newer build exists. Detect-only — applying is the
-        host's job (flake bump + rebuild). Quiet on source runs (DSQRD_REV unset).
+        host's job (local updater or flake rebuild). Quiet without DSQRD_REV.
         Checks at start, then every 3h; also re-checked when a client connects
         (see _serve_conn) so restarting the app surfaces a new build immediately
         instead of waiting on the warm daemon's next poll."""

@@ -43,8 +43,8 @@ Item {
     property string threadTypingWho: ""
 
     // Update-available indicator. The daemon polls the repo's main SHA and pushes
-    // an `updateAvailable` event when a newer build exists (detect-only — the host
-    // applies it via flake bump + rebuild). Empty/quiet on source/dev builds.
+    // an `updateAvailable` event when remote commits are missing. The host
+    // applies it via a local updater or flake rebuild. Quiet without a build rev.
     property bool   updateAvailable: false
     property string updateCurrent: ""
     property string updateLatest: ""
@@ -63,8 +63,8 @@ Item {
     property string callChannel: ""
     function savePrefs(patch) { safeWrite(JSON.stringify({ type: "savePrefs", prefs: patch }) + "\n") }
     // `U` → run the host's apply command. Detect-only: the app never self-updates;
-    // SLK_UPDATE_CMD is the host's "apply" step (e.g. bump the flake + rebuild +
-    // restart). Runs via `sh -c` so the command can spawn its own terminal for sudo.
+    // SLK_UPDATE_CMD is the host's "apply" step (local merge/install/restart or
+    // flake rebuild). Runs via `sh -c` so hosts can supply their own workflow.
     function applyUpdate() {
         const cmd = Quickshell.env("SLK_UPDATE_CMD")
         if (cmd && cmd.length > 0) Quickshell.execDetached(["sh", "-c", cmd])

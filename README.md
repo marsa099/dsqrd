@@ -1,9 +1,8 @@
 # slqs & dsqrd — native Slack & Discord clients for Wayland
 
 > **This is a fork of [daphen/dsqrd](https://github.com/daphen/dsqrd).**
-> **Since 2026-08-10 my machine builds the client from upstream again**, not
-> from here — daphen shipped his own `open` command (a stricter version of
-> mine), so the only thing left worth keeping is:
+> This fork adds a non-Nix install/update path with automatic upstream merges,
+> fork-aware update detection, and a reopenable Quickshell window, alongside:
 >
 > | | What |
 > |---|---|
@@ -11,12 +10,11 @@
 >
 > `dsqrd-cli` is never packaged — it runs straight out of this checkout and
 > talks to whatever daemon is up, and every command it uses exists upstream, so
-> it works unchanged against a stock build. That is the reason this repo is
-> still here.
+> it works unchanged against a stock build.
 >
 > The launcher `pgrep` fix that used to live on this branch is upstream
-> [PR #11](https://github.com/daphen/dsqrd/pull/11); the `DSQRD_*_REPO` update
-> badge plumbing was fork-only and is moot on a stock build. The previous
+> [PR #11](https://github.com/daphen/dsqrd/pull/11). Fork-specific update
+> configuration remains relevant when installing this fork. The previous
 > incarnation of this fork carried a Copilot catch-up panel and an issues
 > panel; both were dropped once daphen shipped his own agent/summary feature.
 > That history is preserved on the
@@ -64,6 +62,72 @@ Built for **Linux + Wayland** — the [niri](https://github.com/YaLTeR/niri) com
 ### slqs (Slack)
 - **Go** (build-time). Produces a self-contained binary; all libraries (slack-go, gorilla/websocket, godbus, esiqveland/notify, …) are compiled in. Uses **pure-Go SQLite** (`modernc.org/sqlite`) — no system SQLite, no cgo.
 - Runtime: the binary + the shared deps (dbus for notifications).
+
+### Arch / non-Nix installation and updates (this fork)
+
+Install system prerequisites first (Arch):
+
+```sh
+sudo pacman -S --needed python python-pip git quickshell util-linux coreutils \
+  ffmpeg imagemagick mpv imv wl-clipboard libnotify
+# If quickshell is not in your enabled repositories, install it separately.
+```
+
+Use a checkout on `main` with `origin` pointing to your GitHub fork and
+`upstream` pointing to `https://github.com/daphen/dsqrd.git`. Configure your Git
+name/email so automatic merge commits can be created. Then:
+
+```sh
+make install-local
+~/.local/bin/dsqrd-client
+```
+
+This installs a dedicated `~/.local/share/dsqrd-venv`, application files, and
+`dsqrd`, `dsqrd-client`, `dsqrd-manage`, and `dsqrd-update` launchers in
+`~/.local/bin`. It restarts the app and preserves runtime preferences/emoji
+state. `PREFIX=/other/path make install-local` is also supported. The previous
+application payload is retained in `PREFIX/share/.dsqrd-previous`.
+
+The in-app **U** action invokes `dsqrd-update`, or run it manually:
+
+```sh
+~/.local/bin/dsqrd-update
+# Detailed foreground output:
+~/.local/bin/dsqrd-manage update
+```
+
+Updates fetch **both origin/main and upstream/main**, automatically merge both
+into your local `main`, install, and restart dsqrd. There is **no automatic
+push**: your GitHub fork is not modified. Merges are first attempted in a
+throwaway worktree; conflicts leave your checkout and installed application
+unchanged. Dirty/untracked work, a non-main checkout, fetch errors, and concurrent
+updates stop the procedure. Commit/stash work first; resolve upstream conflicts
+manually when necessary. A later dependency/install failure can leave the local
+checkout successfully merged while the previous application is still installed;
+fix the error and rerun. Git hooks and upstream code execute with your user
+permissions, just as with a manual source update.
+
+The installer records the published fork/upstream commits actually contained in
+the build, separately from its possibly unpublished local merge revision. Update
+detection compares ancestry against those baselines: being locally ahead is not
+an update, and an unchanged upstream tip does not keep the badge stuck on. Each
+API request has its own ETag and cached response. Failed checks retain the last
+known state rather than claiming "up to date". **Ctrl+Shift+R** checks immediately.
+The changelog uses the published baseline for the advertised update leg.
+
+Update output is saved in `${XDG_STATE_HOME:-~/.local/state}/dsqrd/update.log`;
+notifications report success/failure when `notify-send` is installed. Override
+`SLK_UPDATE_CMD` if you want a different host-specific workflow. NixOS continues
+to use its host-provided rebuild command; this local updater does not modify Nix
+configuration.
+
+Tests (no network or running app required):
+
+```sh
+python3 -m unittest discover -s tests -v
+# Optional live Niri test, closes/reopens the running Discord window:
+python3 tests/test_window_reopen.py ~/.local/bin/dsqrd-client
+```
 
 ### dsqrd (Discord)
 - **Nix** — `run-dsqrd.sh` launches it via `nix-shell shell.nix`.

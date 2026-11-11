@@ -1,0 +1,5 @@
+PySocks
+websocket-client
+filetype
+protobuf
+jeepney

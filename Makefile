@@ -15,4 +15,8 @@ install:
 	@echo "needs binaries on PATH: ffmpeg + ffprobe (GIFs, voice notes), imagemagick, mpv, imv"
 	@echo "set SLK_UPDATE_CMD to your apply step for the in-app 'U' keybind."
 
-.PHONY: install
+# Full per-user setup: dedicated venv, launchers, fork/upstream metadata, updater.
+install-local:
+	python3 scripts/local-install.py install --source "$(CURDIR)" --prefix "$(PREFIX)"
+
+.PHONY: install install-local
