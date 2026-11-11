@@ -50,8 +50,9 @@ class LocalUpdateTest(unittest.TestCase):
         self.commit(self.root / "origin", "fork", "fork")
         self.commit(self.root / "upstream", "shared", "upstream")
         before = installer.git(self.repo, "rev-parse", "HEAD")
-        with self.assertRaises(subprocess.CalledProcessError):
+        with self.assertRaises(installer.MergeConflict) as failure:
             installer.merge_checkout(self.repo)
+        self.assertEqual(failure.exception.files, ["shared"])
         self.assertEqual(installer.git(self.repo, "rev-parse", "HEAD"), before)
         self.assertEqual((self.repo / "shared").read_text(), "local")
         self.assertFalse((self.repo / "fork").exists())

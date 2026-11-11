@@ -102,10 +102,39 @@ push**: your GitHub fork is not modified. Merges are first attempted in a
 throwaway worktree; conflicts leave your checkout and installed application
 unchanged. Dirty/untracked work, a non-main checkout, fetch errors, and concurrent
 updates stop the procedure. Commit/stash work first; resolve upstream conflicts
-manually when necessary. A later dependency/install failure can leave the local
+manually when necessary, or opt in to the terminal repair handoff below.
+A later dependency/install failure can leave the local
 checkout successfully merged while the previous application is still installed;
 fix the error and rerun. Git hooks and upstream code execute with your user
 permissions, just as with a manual source update.
+
+#### Optional conflict-repair terminal
+
+On a machine with Herdr and Pi installed, explicitly enable the repair handoff:
+
+```sh
+python3 scripts/local-install.py install --conflict-assistant herdr
+```
+
+The installer remembers the current Herdr socket, so updates invoked from the
+Discord UI can reach the same session. On a genuine merge conflict, the updater
+opens a new **dsqrd-update** tab in workspace **arch**, creating that workspace
+in the repository directory if necessary. Pi starts with the explicit
+`openai/gpt-6.1-sol` model and instructions to reproduce the pinned merges,
+resolve conflicts while retaining fork/upstream functionality, check new Python
+dependencies, run tests, commit the resolution, and retry installation. It never
+instructs the repair session to push or discard user work. This delegates
+repository write and app-restart permission to an interactive coding session;
+its semantic merge decisions still require judgment and may need your input.
+
+The running app remains untouched while repair is pending. Instructions live
+outside the checkout at `~/.local/state/dsqrd/merge-instructions.md`. An existing
+`arch/dsqrd-update` tab prevents duplicate repair agents; finish or close it
+before requesting another. Startup/auth/approval errors are logged instead of
+being reported as a successful handoff. No repair session opens on network
+errors or dirty checkouts. Use `--no-assistant` on an individual update to fail
+normally, or reinstall with `--conflict-assistant none` to disable the feature.
+This optional integration does not change the NixOS update path.
 
 The installer records the published fork/upstream commits actually contained in
 the build, separately from its possibly unpublished local merge revision. Update
